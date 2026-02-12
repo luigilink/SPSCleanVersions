@@ -45,7 +45,7 @@
     .NOTES
     FileName:	SPSCleanVersions.ps1
     Author:		Jean-Cyril DROUHIN
-    Date:		January 27, 2026
+    Date:		February 12, 2026
     Version:	1.0.0
 
     .LINK
@@ -53,55 +53,96 @@
     https://github.com/luigilink/SPSCleanVersions
 #>
 
+[CmdletBinding(SupportsShouldProcess)]
 param
 (
-    [Parameter(Position = 0, Mandatory=$true, HelpMessage="List of Site Collection URLs separated by commas")]
+    [Parameter(Position = 0, Mandatory = $true, HelpMessage = "List of Site Collection URLs separated by commas")]
     [System.String[]]
     $SiteUrls,
 
-    [Parameter(Position = 1, Mandatory=$false)]
+    [Parameter(Position = 1, Mandatory = $false)]
     [System.UInt32]
     $KeepMajorVersions = 50,
 
-    [Parameter(Position = 2, Mandatory=$false)]
+    [Parameter(Position = 2, Mandatory = $false)]
     [System.UInt32]
     $KeepMinorVersions = 0,
 
-    [Parameter(Position = 3, Mandatory=$false)]
+    [Parameter(Position = 3, Mandatory = $false)]
     [System.String]
-    $ManagedIdentityId,
-
-    [Parameter(Position = 4, Mandatory=$false)]
-    [Switch]
-    $WhatIf
+    $ClientId  # Default ClientId for Microsoft Graph and SharePoint Online Management Shell
 )
 
-Process {
-    Write-Host "--- Starting SPSCleanVersions ---" -ForegroundColor Cyan
+Write-Host "--- Starting SPSCleanVersions ---" -ForegroundColor Cyan
 
-    foreach ($SiteUrl in $SiteUrls) {
-        Write-Host "Processing Site: $SiteUrl" -ForegroundColor Yellow
-        
-        try {
-            # Environnement : Local vs Azure Automation
-            if ($null -ne $env:AUTOMATION_ASSET_NAME) {
-                Write-Output "Running in Azure Automation. Connecting via Managed Identity..."
-                if ($null -ne $ManagedIdentityId) {
-                    Connect-PnPOnline -Url $SiteUrl -ManagedIdentity -ClientId $ManagedIdentityId
-                } else {
-                    Connect-PnPOnline -Url $SiteUrl -ManagedIdentity
-                }
-            } 
+foreach ($SiteUrl in $SiteUrls) {
+    Write-Host "Processing Site: $SiteUrl" -ForegroundColor Yellow
+    
+    try {
+        # Environnement : Local vs Azure Automation
+        if ($null -ne $env:AUTOMATION_ASSET_NAME) {
+            Write-Output "Running in Azure Automation. Connecting via Managed Identity..."
+            if ($null -ne $ClientId) {
+                Connect-PnPOnline -Url $SiteUrl -ManagedIdentity -ClientId $ClientId
+            }
             else {
-                Write-Output "Running locally. Connecting via Interactive login..."
-                Connect-PnPOnline -Url $SiteUrl -Interactive
+                Connect-PnPOnline -Url $SiteUrl -ManagedIdentity
+            }
+        } 
+        else {
+            Write-Output "Running locally. Connecting via Interactive login..."
+            Connect-PnPOnline -Url $SiteUrl -Interactive -ClientId $ClientId
+        }
+        # Get all Lists in the Site
+        $allLists = Get-PnPList
+        $targetLists = $allLists | Where-Object {
+            $_.Hidden -eq $false -and
+            $_.EnableVersioning -eq $true -and
+            $_.RootFolder.ServerRelativeUrl -notlike "*_catalogs*" -and
+            $_.RootFolder.ServerRelativeUrl -notlike "*/SiteAssets*" -and
+            $_.RootFolder.ServerRelativeUrl -notlike "*/SitePages*" -and
+            $_.RootFolder.ServerRelativeUrl -notlike "*/Style Library*" -and
+            $_.BaseTemplate -eq 101 # Document Libraries only
+        }
+        foreach ($list in $targetLists) {
+            $minorDesired = ($KeepMinorVersions -gt 0)
+            $changeNeeded = ($list.MajorVersionLimit -ne $KeepMajorVersions) -or
+            ($list.EnableMinorVersions -ne $minorDesired) -or
+            ($minorDesired -and ($list.MajorWithMinorVersionsLimit -ne $KeepMinorVersions)) -or
+            (-not $minorDesired -and ($list.MajorWithMinorVersionsLimit -ne 0))
+
+            if ($changeNeeded) {
+                if ($PSCmdlet.ShouldProcess($list.Title, "Set versioning policy")) {
+                    $p = @{
+                        Identity         = "$($list.Title)"
+                        EnableVersioning = $true
+                        MajorVersions    = $KeepMajorVersions
+                    }
+                    if ($minorDesired) {
+                        $p.EnableMinorVersions = $true
+                        $p.MinorVersions = $KeepMinorVersions
+                    }
+                    else {
+                        $p.EnableMinorVersions = $false
+                    }
+                    try {
+                        Set-PnPList @p -ErrorAction Stop
+                        Write-Host "`t$($list.Title) -> Major=$KeepMajorVersions; MinorEnabled=$minorDesired; MinorLimit=$KeepMinorVersions" -ForegroundColor Green
+                    }
+                    catch {
+                        Write-Warning "`tFAILED $($list.Title): $($_.Exception.Message)"
+                    }
+                }
+            }
+            else {
+                Write-Host "`t$($list.Title) already compliant" -ForegroundColor DarkGray
             }
         }
-        catch {
-            Write-Error "Failed to process site $SiteUrl : $($_.Exception.Message)"
-        }
-        finally {
-            Disconnect-PnPOnline
-        }
+    }
+    catch {
+        Write-Error "Failed to process site $SiteUrl : $($_.Exception.Message)"
+    }
+    finally {
+        Disconnect-PnPOnline
     }
 }
