@@ -1,4 +1,4 @@
-# SPSCleanVersions - SharePoint Cumulative Update Tool
+# SPSCleanVersions
 
 SPSCleanVersions is a PowerShell script tool to clean Version History in your SharePoint Tenant. Optimize your storage costs by managing major and minor versions across libraries and lists.
 
