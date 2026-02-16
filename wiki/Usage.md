@@ -33,6 +33,14 @@ This tool relies on the PnP.PowerShell module. [Installation guide](https://pnp.
 .\SPSCleanVersions.ps1 -SiteUrls @('https://contoso.sharepoint.com/sites/News','https://contoso.sharepoint.com/sites/HR') -KeepMajorVersions 50 -WhatIf
 ```
 
+### Example 3: Force Deletion of Old File Version History
+
+Use the `-ForceDeleteOldVersions` switch to submit a batch delete job that removes old file versions exceeding the configured limits via `New-PnPSiteFileVersionBatchDeleteJob`.
+
+```powershell
+.\SPSCleanVersions.ps1 -SiteUrls @('https://contoso.sharepoint.com/sites/News') -KeepMajorVersions 50 -ForceDeleteOldVersions -WhatIf
+```
+
 ## Error Handling
 
 Ensure the provided credentials have access to the SharePoint Sites.

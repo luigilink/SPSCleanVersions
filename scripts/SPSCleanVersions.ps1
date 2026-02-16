@@ -45,8 +45,8 @@
     .NOTES
     FileName:	SPSCleanVersions.ps1
     Author:		Jean-Cyril DROUHIN
-    Date:		February 12, 2026
-    Version:	1.0.0
+    Date:		February 16, 2026
+    Version:	1.1.0
 
     .LINK
     https://spjc.fr/
@@ -70,7 +70,11 @@ param
 
     [Parameter(Position = 3, Mandatory = $false)]
     [System.String]
-    $ClientId  # Default ClientId for Microsoft Graph and SharePoint Online Management Shell
+    $ClientId,  # Default ClientId for Microsoft Graph and SharePoint Online Management Shell
+
+    [Parameter(Position = 4, Mandatory = $false, HelpMessage = "Force deletion of old file version history using New-PnPSiteFileVersionBatchDeleteJob")]
+    [switch]
+    $ForceDeleteOldVersions
 )
 
 Write-Host "--- Starting SPSCleanVersions ---" -ForegroundColor Cyan
@@ -136,6 +140,24 @@ foreach ($SiteUrl in $SiteUrls) {
             }
             else {
                 Write-Host "`t$($list.Title) already compliant" -ForegroundColor DarkGray
+            }
+        }
+
+        # Force deletion of old file version history
+        if ($ForceDeleteOldVersions) {
+            if ($PSCmdlet.ShouldProcess($SiteUrl, "Delete old file version history")) {
+                try {
+                    Write-Host "`tStarting batch delete job for old file versions on $SiteUrl..." -ForegroundColor Yellow
+                    $batchParams = @{
+                        MajorVersionLimit              = $KeepMajorVersions
+                        MajorWithMinorVersionsLimit    = $KeepMinorVersions
+                    }
+                    New-PnPSiteFileVersionBatchDeleteJob @batchParams -Force -ErrorAction Stop
+                    Write-Host "`tBatch delete job submitted successfully for $SiteUrl" -ForegroundColor Green
+                }
+                catch {
+                    Write-Warning "`tFAILED to submit batch delete job for ${SiteUrl}: $($_.Exception.Message)"
+                }
             }
         }
     }

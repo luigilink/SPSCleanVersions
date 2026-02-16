@@ -3,6 +3,14 @@
 The format is based on and uses the types of changes according to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-02-16
+
+### Added
+
+- SPSCleanVersions.ps1
+  - Add `ForceDeleteOldVersions` switch parameter to force deletion of old
+    file version history using `New-PnPSiteFileVersionBatchDeleteJob` cmdlet
+
 ## [1.0.0] - 2026-02-12
 
 ### Added

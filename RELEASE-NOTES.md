@@ -1,29 +1,11 @@
 # SPSCleanVersions - Release Notes
 
-## [1.0.0] - 2026-02-12
+## [1.1.0] - 2026-02-16
 
 ### Added
 
-- README.md
-  - Add code_of_conduct.md badge
-  - Add Requirement and Changelog sections
-- Add CODE_OF_CONDUCT.md file
-- Add Issue Templates files:
-  - 1_bug_report.yml
-  - 2_feature_request.yml
-  - 3_documentation_request.yml
-  - 4_improvement_request.yml
-  - config.yml
-- Add RELEASE-NOTES.md file
-- Add CHANGELOG.md file
-- Add CONTRIBUTING.md file
-- Add release.yml file
-- Add scripts folder with first version of SPSCleanVersions
-- Wiki Documentation in repository - Add :
-  - wiki/Configuration.md
-  - wiki/Getting-Started.md
-  - wiki/Home.md
-  - wiki/Usage.md
-  - .github/workflows/wiki.yml
+- SPSCleanVersions.ps1
+  - Add `ForceDeleteOldVersions` switch parameter to force deletion of old
+    file version history using `New-PnPSiteFileVersionBatchDeleteJob` cmdlet
 
 A full list of changes in each version can be found in the [change log](CHANGELOG.md)
