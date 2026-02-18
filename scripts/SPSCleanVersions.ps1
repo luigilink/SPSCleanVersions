@@ -1,5 +1,5 @@
 <#PSScriptInfo
-    .VERSION 1.0.0
+    .VERSION 1.1.1
 
     .GUID 7ecf4acd-17c4-4c50-be79-1fcf2b6611fe
 
@@ -46,7 +46,7 @@
     FileName:	SPSCleanVersions.ps1
     Author:		Jean-Cyril DROUHIN
     Date:		February 16, 2026
-    Version:	1.1.0
+    Version:	1.1.1
 
     .LINK
     https://spjc.fr/
