@@ -2,13 +2,13 @@
 
 ## Requirements
 
-### PowerShell 7.x
+### PowerShell 7.2+ (Core)
 
-Required for performance and class-based resource management. [Installation guide](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell?view=powershell-7.5).
+Requires PowerShell 7.2 or later with PSEdition Core. [Installation guide](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell?view=powershell-7.5).
 
-### Module PnP.PowerShell
+### Module PnP.PowerShell (>= 2.12.0)
 
-This tool relies on the PnP.PowerShell module. [Installation guide](https://pnp.github.io/powershell/articles/installation.html).
+This tool relies on the PnP.PowerShell module version 2.12.0 or later. [Installation guide](https://pnp.github.io/powershell/articles/installation.html).
 
 ### Permissions
 
@@ -21,7 +21,8 @@ This tool relies on the PnP.PowerShell module. [Installation guide](https://pnp.
 
 ## Next Step
 
-For the next steps, go to the [Usage](./Usage) page.
+For JSON parameter configuration and examples, go to the [Configuration](./Configuration) page.
+For usage details, go to the [Usage](./Usage) page.
 
 ## Change log
 

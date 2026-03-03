@@ -4,12 +4,15 @@ SPSCleanVersions is a PowerShell script tool to clean Version History in your Sh
 
 ## Key Features
 
-* **Simulation Mode:** Support for `-WhatIf` to preview changes and estimate potential storage gains safely.
+* **Single JSON Input:** All configuration is passed via a single `-InputJson` string parameter, ensuring full compatibility with Azure Automation Runbooks.
+* **Simulation Mode:** Use `"DryRun": true` in the JSON (or `-WhatIf` locally) to preview changes safely.
 * **Flexible Retention:** Define custom thresholds for major and minor versions.
-* **Granular Targeting:** Process a single Site Collection or multiple sites via a list, avoiding tenant-wide timeouts.
-* **Force Delete Old Versions:** Use `-ForceDeleteOldVersions` to trigger a batch delete job via `New-PnPSiteFileVersionBatchDeleteJob`, trimming file versions exceeding the configured major/minor count limits.
+* **Multi-Site Processing:** Pass multiple Site Collection URLs in the `SiteUrls` JSON array to process them in a single execution.
+* **Force Delete Old Versions:** Set `"ForceDeleteOldVersions": true` to trigger a batch delete job via `New-PnPSiteFileVersionBatchDeleteJob`. Requires delegated user context (automatically skipped in Azure Automation).
+* **Azure Automation Ready:** Single string parameter avoids all runbook type limitations (arrays, switches, booleans).
 
 For details on usage, configuration, and parameters, explore the links below:
 
 * [Getting Started](./Getting-Started)
+* [Configuration](./Configuration)
 * [Usage](./Usage)
