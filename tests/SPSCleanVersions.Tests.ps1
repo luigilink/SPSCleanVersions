@@ -61,11 +61,11 @@ Describe 'SPSCleanVersions Script' {
             $paramBlock | Should -Not -BeNullOrEmpty
         }
 
-        It 'Should have SiteUrls as a mandatory parameter' {
-            $siteUrlsParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'SiteUrls' }
-            $siteUrlsParam | Should -Not -BeNullOrEmpty
+        It 'Should have InputJson as the only mandatory parameter' {
+            $inputJsonParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'InputJson' }
+            $inputJsonParam | Should -Not -BeNullOrEmpty
 
-            $mandatoryAttr = $siteUrlsParam.Attributes | Where-Object {
+            $mandatoryAttr = $inputJsonParam.Attributes | Where-Object {
                 $_ -is [System.Management.Automation.Language.AttributeAst] -and
                 $_.TypeName.Name -eq 'Parameter'
             }
@@ -73,50 +73,71 @@ Describe 'SPSCleanVersions Script' {
             $mandatoryArg | Should -Not -BeNullOrEmpty
         }
 
-        It 'Should have SiteUrls typed as System.String[]' {
-            $siteUrlsParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'SiteUrls' }
-            $typeAttr = $siteUrlsParam.Attributes | Where-Object {
+        It 'Should have InputJson typed as System.String' {
+            $inputJsonParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'InputJson' }
+            $typeAttr = $inputJsonParam.Attributes | Where-Object {
                 $_ -is [System.Management.Automation.Language.TypeConstraintAst]
             }
-            $typeAttr.TypeName.FullName | Should -Be 'System.String[]'
+            $typeAttr.TypeName.FullName | Should -Be 'System.String'
         }
 
-        It 'Should have KeepMajorVersions parameter with default value 50' {
-            $param = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'KeepMajorVersions' }
-            $param | Should -Not -BeNullOrEmpty
-            $param.DefaultValue.ToString() | Should -Be '50'
-        }
-
-        It 'Should have KeepMinorVersions parameter with default value 0' {
-            $param = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'KeepMinorVersions' }
-            $param | Should -Not -BeNullOrEmpty
-            $param.DefaultValue.ToString() | Should -Be '0'
-        }
-
-        It 'Should have ClientId as an optional string parameter' {
-            $param = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'ClientId' }
-            $param | Should -Not -BeNullOrEmpty
-
-            $mandatoryAttr = $param.Attributes | Where-Object {
+        It 'Should have InputJson with ValidateNotNullOrEmpty' {
+            $inputJsonParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'InputJson' }
+            $validateAttr = $inputJsonParam.Attributes | Where-Object {
                 $_ -is [System.Management.Automation.Language.AttributeAst] -and
-                $_.TypeName.Name -eq 'Parameter'
+                $_.TypeName.Name -eq 'ValidateNotNullOrEmpty'
             }
-            $mandatoryArg = $mandatoryAttr.NamedArguments | Where-Object {
-                $_.ArgumentName -eq 'Mandatory' -and $_.ExpressionOmitted -eq $false
-            }
-            if ($mandatoryArg) {
-                $mandatoryArg.Argument.SafeGetValue() | Should -Be $false
-            }
+            $validateAttr | Should -Not -BeNullOrEmpty
         }
 
-        It 'Should have ForceDeleteOldVersions as a switch parameter' {
-            $param = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'ForceDeleteOldVersions' }
-            $param | Should -Not -BeNullOrEmpty
+        It 'Should have exactly one parameter in the param block' {
+            $paramBlock.Parameters.Count | Should -Be 1
+        }
+    }
 
-            $typeAttr = $param.Attributes | Where-Object {
-                $_ -is [System.Management.Automation.Language.TypeConstraintAst]
-            }
-            $typeAttr.TypeName.Name | Should -Be 'switch'
+    Context 'JSON parsing and validation' {
+
+        It 'Should parse InputJson with ConvertFrom-Json' {
+            $scriptContent | Should -Match 'ConvertFrom-Json'
+        }
+
+        It 'Should validate that SiteUrls property is required' {
+            $scriptContent | Should -Match "SiteUrls.*required"
+        }
+
+        It 'Should apply default value of 50 for KeepMajorVersions' {
+            $scriptContent | Should -Match 'KeepMajorVersions.*50'
+        }
+
+        It 'Should apply default value of 0 for KeepMinorVersions' {
+            $scriptContent | Should -Match 'KeepMinorVersions.*0'
+        }
+
+        It 'Should apply default value of false for ForceDeleteOldVersions' {
+            $scriptContent | Should -Match 'ForceDeleteOldVersions.*\$false'
+        }
+
+        It 'Should apply default value of false for DryRun' {
+            $scriptContent | Should -Match 'DryRun.*\$false'
+        }
+
+        It 'Should throw on invalid JSON input' {
+            $scriptContent | Should -Match 'Invalid JSON input'
+        }
+    }
+
+    Context 'Script requirements' {
+
+        It 'Should require PowerShell 7.2' {
+            $scriptContent | Should -Match '#Requires\s+-Version\s+7\.2'
+        }
+
+        It 'Should require PSEdition Core' {
+            $scriptContent | Should -Match '#Requires\s+-PSEdition\s+Core'
+        }
+
+        It 'Should require PnP.PowerShell module' {
+            $scriptContent | Should -Match "#Requires\s+-Modules.*PnP\.PowerShell"
         }
     }
 
@@ -129,9 +150,33 @@ Describe 'SPSCleanVersions Script' {
         It 'Should have CmdletBinding attribute' {
             $scriptContent | Should -Match '\[CmdletBinding\('
         }
+
+        It 'Should set WhatIfPreference when DryRun is specified' {
+            $scriptContent | Should -Match 'if\s*\(\$DryRun\)\s*\{\s*\$WhatIfPreference\s*=\s*\$true'
+        }
+    }
+
+    Context 'Azure Automation detection' {
+
+        It 'Should define Test-IsAzureAutomation function' {
+            $scriptContent | Should -Match 'function\s+Test-IsAzureAutomation'
+        }
+
+        It 'Should check multiple environment signals for Azure Automation' {
+            $scriptContent | Should -Match 'AZUREPS_HOST_ENVIRONMENT'
+            $scriptContent | Should -Match 'IDENTITY_ENDPOINT'
+        }
+
+        It 'Should disable PnP PowerShell update check' {
+            $scriptContent | Should -Match 'PNPPOWERSHELL_UPDATECHECK'
+        }
     }
 
     Context 'Core logic patterns' {
+
+        It 'Should iterate over SiteUrls with foreach' {
+            $scriptContent | Should -Match 'foreach\s*\(\$SiteUrl\s+in\s+\$SiteUrls\)'
+        }
 
         It 'Should connect to PnP Online' {
             $scriptContent | Should -Match 'Connect-PnPOnline'
@@ -163,7 +208,7 @@ Describe 'SPSCleanVersions Script' {
 
         It 'Should handle Azure Automation with Managed Identity' {
             $scriptContent | Should -Match 'ManagedIdentity'
-            $scriptContent | Should -Match 'AUTOMATION_ASSET_NAME'
+            $scriptContent | Should -Match 'Test-IsAzureAutomation'
         }
 
         It 'Should handle local execution with Interactive login' {
@@ -190,6 +235,14 @@ Describe 'SPSCleanVersions Script' {
 
         It 'Should pass MajorWithMinorVersionsLimit to batch delete job' {
             $scriptContent | Should -Match 'MajorWithMinorVersionsLimit'
+        }
+
+        It 'Should skip batch delete when running in Azure Automation (app-only context)' {
+            $scriptContent | Should -Match 'Test-IsAzureAutomation'
+        }
+
+        It 'Should warn when batch delete is skipped due to app-only auth' {
+            $scriptContent | Should -Match 'NOT supported with app-only authentication'
         }
     }
 
