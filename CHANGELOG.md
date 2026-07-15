@@ -3,6 +3,19 @@
 The format is based on and uses the types of changes according to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- CI/CD
+  - Publish the script to the **PowerShell Gallery** on tagged releases
+    (`Publish-Script` step in `release.yml`). Install with
+    `Install-Script -Name SPSCleanVersions`. Requires the `PSGALLERYKEY`
+    repository secret
+- Documentation
+  - Add PowerShell Gallery install instructions (Getting Started, README) and a
+    PSGallery version badge
+
 ## [3.1.3] - 2026-07-15
 
 ### Fixed

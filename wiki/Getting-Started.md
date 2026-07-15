@@ -26,7 +26,13 @@ This tool relies on the PnP.PowerShell module version 2.12.0 or later. [Installa
 
 ## Installation
 
-1. [Download the latest release](https://github.com/luigilink/SPSCleanVersions/releases/latest) and unzip to a directory on your machine tool.
+Install from the [PowerShell Gallery](https://www.powershellgallery.com/packages/SPSCleanVersions):
+
+```powershell
+Install-Script -Name SPSCleanVersions
+```
+
+Or [download the latest release](https://github.com/luigilink/SPSCleanVersions/releases/latest) and unzip to a directory on your machine.
 
 ## Azure Automation runbook setup
 
