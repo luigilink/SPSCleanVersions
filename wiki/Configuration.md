@@ -1,6 +1,13 @@
 # Configuration
 
-`SPSCleanVersions.ps1` accepts a single `-InputJson` parameter containing a JSON string with all configuration. This design ensures full compatibility with Azure Automation Runbooks, which have limitations with array, switch, and boolean parameter types.
+`SPSCleanVersions.ps1` accepts its configuration as JSON, from one of two mutually exclusive sources:
+
+- **`-InputJson '<json string>'`** — an inline JSON string. Ideal for **Azure Automation Runbooks**, where the string is pasted directly into the runbook parameter field. This avoids all runbook limitations with array, switch, and boolean parameter types.
+- **`-ConfigFile '<path>.json'`** — a path to a local JSON file with the same schema. Ideal for **local execution and testing**, where a versionable config file on disk is more convenient.
+
+Both sources are parsed with `ConvertFrom-Json` and share the exact same schema, defaults, and validation.
+
+> **Why JSON and not `.psd1`?** `ConvertFrom-Json` is fully supported in the Azure Automation sandbox, whereas reading a `.psd1` from disk with `Import-PowerShellDataFile` is not applicable there. Keeping a single JSON schema means the runbook input and the local file stay identical.
 
 ## JSON Schema
 
@@ -27,6 +34,30 @@
 | `DryRun` | boolean | No | `false` | When `true`, simulates all changes without applying them. Use this instead of `-WhatIf` when running as an Azure Automation Runbook. |
 
 ## Examples
+
+### File-based configuration (local execution)
+
+Save a JSON file (e.g. `Config/contoso-PROD.json`, ignored by git) and pass it with `-ConfigFile`. A ready-to-copy template is provided in [`Config/SPSCleanVersions.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.example.json).
+
+```json
+{
+  "SiteUrls": [
+    "https://contoso.sharepoint.com/sites/News",
+    "https://contoso.sharepoint.com/sites/HR"
+  ],
+  "KeepMajorVersions": 50,
+  "KeepMinorVersions": 0,
+  "ClientId": "8cef7dae-500b-45ae-a717-b388ed2e7f69",
+  "ForceDeleteOldVersions": false,
+  "DryRun": true
+}
+```
+
+```powershell
+.\SPSCleanVersions.ps1 -ConfigFile '.\Config\contoso-PROD.json'
+```
+
+> **Tip:** Only `Config/*.example.json` is tracked in git. Real config files (`Config/*.json`) are ignored so your site URLs and Client IDs never land in version control.
 
 ### Minimal: Single site with defaults
 
