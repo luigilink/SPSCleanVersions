@@ -367,6 +367,86 @@ Describe 'SPSCleanVersions Script' {
         }
     }
 
+    Context 'Site version policy feature' {
+
+        It 'Should define the Set-SiteVersionPolicy helper function' {
+            $scriptContent | Should -Match 'function\s+Set-SiteVersionPolicy'
+        }
+
+        It 'Should call Set-PnPSiteVersionPolicy' {
+            $scriptContent | Should -Match 'Set-PnPSiteVersionPolicy'
+        }
+
+        It 'Should default VersionPolicyMode to Legacy' {
+            $scriptContent | Should -Match "VersionPolicyMode.*'Legacy'"
+        }
+
+        It 'Should validate VersionPolicyMode against the allowed set' {
+            $scriptContent | Should -Match "AutoExpiration"
+            $scriptContent | Should -Match "ExpireAfter"
+            $scriptContent | Should -Match "NoExpiration"
+            $scriptContent | Should -Match "InheritFromTenant"
+        }
+
+        It 'Should branch to the legacy Set-PnPList path when VersionPolicyMode is Legacy' {
+            $scriptContent | Should -Match "\`$VersionPolicyMode\s+-eq\s+'Legacy'"
+        }
+
+        It 'Should map AutoExpiration to EnableAutoExpirationVersionTrim' {
+            $scriptContent | Should -Match 'EnableAutoExpirationVersionTrim'
+        }
+
+        It 'Should support ExpireVersionsAfterDays' {
+            $scriptContent | Should -Match 'ExpireVersionsAfterDays'
+        }
+
+        It 'Should validate ExpireVersionsAfterDays is 0 or >= 30' {
+            $scriptContent | Should -Match "must be 0 \(no expiration\) or greater than or equal to 30"
+        }
+
+        It 'Should map ApplyTo to ApplyToNew/ExistingDocumentLibraries' {
+            $scriptContent | Should -Match 'ApplyToNewDocumentLibraries'
+            $scriptContent | Should -Match 'ApplyToExistingDocumentLibraries'
+        }
+
+        It 'Should support InheritFromTenant' {
+            $scriptContent | Should -Match 'InheritFromTenant'
+        }
+    }
+
+    Context 'Site version policy (functional)' {
+
+        BeforeAll {
+            # Reproduce the ExpireVersionsAfterDays validation rules in isolation.
+            function Test-ExpireDays {
+                param([string]$Mode, [int]$Days)
+                if ($Days -ne 0 -and $Days -lt 30) {
+                    throw "'ExpireVersionsAfterDays' must be 0 (no expiration) or greater than or equal to 30."
+                }
+                if ($Mode -eq 'ExpireAfter' -and $Days -lt 30) {
+                    throw "VersionPolicyMode 'ExpireAfter' requires 'ExpireVersionsAfterDays' to be greater than or equal to 30."
+                }
+                return $true
+            }
+        }
+
+        It 'Accepts 0 (no expiration)' {
+            Test-ExpireDays -Mode 'NoExpiration' -Days 0 | Should -BeTrue
+        }
+
+        It 'Accepts a value >= 30' {
+            Test-ExpireDays -Mode 'ExpireAfter' -Days 180 | Should -BeTrue
+        }
+
+        It 'Rejects a value between 1 and 29' {
+            { Test-ExpireDays -Mode 'ExpireAfter' -Days 10 } | Should -Throw
+        }
+
+        It 'Rejects ExpireAfter with 0 days' {
+            { Test-ExpireDays -Mode 'ExpireAfter' -Days 0 } | Should -Throw -ExpectedMessage "*requires 'ExpireVersionsAfterDays'*"
+        }
+    }
+
     Context 'Error handling' {
 
         It 'Should use try/catch/finally pattern' {
