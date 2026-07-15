@@ -2,44 +2,60 @@
 
 ## Overview
 
-`SPSCleanVersions.ps1` is a PowerShell script tool to clean Version History in your SharePoint Tenant. Optimize your storage costs by managing major and minor versions across libraries and lists.
+`SPSCleanVersions.ps1` is a PowerShell script tool to clean Version History in your SharePoint Tenant. Optimize your storage costs by managing major and minor versions across libraries and lists, apply site-level version policies (including expiration), and process selected sites or the whole tenant — only where a change is actually needed.
+
+Install from the PowerShell Gallery:
+
+```powershell
+Install-Script -Name SPSCleanVersions
+```
 
 ## Requirements
 
-### PowerShell 7.2+ (Core)
+### PowerShell 7.2+ / 7.4 for PnP 3.x
 
-Requires PowerShell 7.2 or later with PSEdition Core. [Installation guide](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell?view=powershell-7.5).
+Requires PowerShell 7 (Core). **PnP.PowerShell 3.x requires PowerShell 7.4** (the 2.12.x line supports 7.2). In Azure Automation, use a **PowerShell 7.4 Runtime Environment** with PnP 3.x. See the version matrix in [Getting Started](./Getting-Started).
 
-### Module PnP.PowerShell (>= 2.12.0)
+### Module PnP.PowerShell
 
-This tool relies on the PnP.PowerShell module version 2.12.0 or later. [Installation guide](https://pnp.github.io/powershell/articles/installation.html).
+This tool relies on the PnP.PowerShell module. Use **3.x** for the site version policy modes (requires PS 7.4); the 2.12.x line covers the Legacy mode on PS 7.2. [Installation guide](https://pnp.github.io/powershell/articles/installation.html).
 
 ### Permissions
 
 * **Role:** SharePoint Administrator or Global Administrator.
-* **API Permissions:** `Sites.FullControl.All` (when using App Registration).
+* **API Permissions:** `Sites.FullControl.All` (when using App Registration / Managed Identity).
 
 ## Parameters
 
-The script accepts its configuration from one of two mutually exclusive sources:
+Configuration is provided as JSON, from one of two **mutually exclusive** parameters (supply exactly one):
 
-| Parameter | Type | Parameter Set | Description |
-|---|---|---|---|
-| `-InputJson` | string | InlineJson (default) | Inline JSON string with all configuration. Ideal for Azure Automation Runbooks. |
-| `-ConfigFile` | string | ConfigFile | Path to a local JSON file with the same schema. Ideal for local execution and testing. |
+| Parameter | Type | Description |
+|---|---|---|
+| `-InputJson` | string | Inline JSON string with all configuration. Ideal for Azure Automation Runbooks (paste the raw JSON, no surrounding quotes). |
+| `-ConfigFile` | string | Path to a local JSON file with the same schema. Ideal for local execution and testing. |
+
+> Parameter sets are **not** used (they are unsupported in Azure Automation runbooks); the script validates at runtime that exactly one source is provided.
 
 ### JSON schema (shared by both sources)
 
-All configuration is expressed as JSON. Supported properties:
-
 | Property | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `SiteUrls` | string[] | **Yes** | — | Site Collection URLs to process |
-| `KeepMajorVersions` | integer | No | `50` | Number of major versions to keep |
-| `KeepMinorVersions` | integer | No | `0` | Number of minor versions to keep |
-| `ClientId` | string | No | — | Azure AD App Registration Client ID |
-| `ForceDeleteOldVersions` | boolean | No | `false` | Trigger batch delete of old file versions |
-| `DryRun` | boolean | No | `false` | Simulate changes without applying them |
+| `SiteUrls` | string[] | Conditional | — | Site Collection URLs to process. Required unless `SiteScope` is `All`. |
+| `KeepMajorVersions` | integer | No | `50` | Major versions to keep (maps to `-MajorVersions` in the site policy modes). |
+| `KeepMinorVersions` | integer | No | `0` | Minor versions to keep (maps to `-MajorWithMinorVersions`). |
+| `ClientId` | string | No | — | Azure AD App Registration / Managed Identity Client ID. |
+| `ForceDeleteOldVersions` | boolean | No | `false` | Trigger a batch delete of old file versions (delegated context; skipped app-only). |
+| `DryRun` | boolean | No | `false` | Simulate changes without applying them (runbook-friendly `-WhatIf`). |
+| `VersionPolicyMode` | string | No | `Legacy` | `Legacy` (per-library `Set-PnPList`), or `AutoExpiration` / `ExpireAfter` / `NoExpiration` / `InheritFromTenant` (site-level `Set-PnPSiteVersionPolicy`). |
+| `ExpireVersionsAfterDays` | integer | No | `0` | Expiration window for `ExpireAfter` (must be `0` or `>= 30`). |
+| `ApplyTo` | string | No | `Both` | `New` / `Existing` / `Both` document libraries (site policy modes only). |
+| `SiteScope` | string | No | `Selected` | `Selected` (process `SiteUrls`) or `All` (enumerate the tenant via `Get-PnPTenantSite`). |
+| `TenantAdminUrl` | string | Conditional | — | SharePoint admin center URL, required when `SiteScope` is `All`. |
+| `SiteFilter` | string | No | — | Server-side `-Filter` for `Get-PnPTenantSite` when `SiteScope` is `All`. |
+| `EnableReport` | boolean | No | `true` | Write a local HTML report to `Results/` (local execution only). |
+| `LogRetentionDays` | integer | No | `180` | Prune `Logs/`/`Results/` files older than N days (local only; `0` disables). |
+
+See the [Configuration](./Configuration) page for the full reference and more examples.
 
 ## Examples
 
@@ -97,7 +113,7 @@ Ensure the provided credentials have access to the SharePoint Sites.
 
 ## Notes
 
-Test the script in a non-production environment before deploying it widely.
+Test the script in a non-production environment before deploying it widely. The HTML report is written to `Results/` **during local execution only**; in Azure Automation the per-site actions and a run summary are printed to the job output instead.
 
 ## Support
 
