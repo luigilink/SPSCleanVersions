@@ -1,5 +1,5 @@
 <#PSScriptInfo
-    .VERSION 3.1.2
+    .VERSION 3.1.3
 
     .GUID 7ecf4acd-17c4-4c50-be79-1fcf2b6611fe
 
@@ -97,7 +97,7 @@
     FileName:	SPSCleanVersions.ps1
     Author:		Jean-Cyril DROUHIN
     Date:		July 15, 2026
-    Version:	3.1.2
+    Version:	3.1.3
 
     .LINK
     https://spjc.fr/
@@ -337,8 +337,11 @@ function Export-SPSCleanVersionsReport {
     $rows = @($Results)
     $total = $rows.Count
     $applied = @($rows | Where-Object { $_.Outcome -eq 'Applied' }).Count
+    $wouldApply = @($rows | Where-Object { $_.Outcome -eq 'WouldApply' }).Count
     $skipped = @($rows | Where-Object { $_.Outcome -eq 'Skipped' -or $_.Outcome -eq 'Compliant' }).Count
     $failed = @($rows | Where-Object { $_.Outcome -eq 'Failed' }).Count
+    $appliedLabel = if ($DryRunMode) { 'Would apply' } else { 'Applied' }
+    $appliedValue = if ($DryRunMode) { $wouldApply } else { $applied }
     $generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
     $overall = if ($failed -gt 0) { 'ATTENTION' } else { 'OK' }
     $overallClass = if ($failed -gt 0) { 'kpi-alert' } else { 'kpi-ok' }
@@ -373,6 +376,7 @@ tbody tr:nth-child(even){background:var(--zebra)}
 tr.row-alert td{background:#fff5f5}
 .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:600;color:#fff}
 .badge.Applied{background:var(--brand)}
+.badge.WouldApply{background:#6f42c1}
 .badge.Skipped,.badge.Compliant{background:#9aa4ad}
 .badge.Failed{background:#c0392b}
 footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
@@ -400,7 +404,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
 <div class="layout">
   <div class="cards">
     <div class="card"><div class="card-value">$total</div><div class="card-label">Sites processed</div></div>
-    <div class="card"><div class="card-value">$applied</div><div class="card-label">Applied</div></div>
+    <div class="card"><div class="card-value">$appliedValue</div><div class="card-label">$appliedLabel</div></div>
     <div class="card"><div class="card-value">$skipped</div><div class="card-label">Skipped / compliant</div></div>
     <div class="$failedCardClass"><div class="card-value">$failed</div><div class="card-label">Failed</div></div>
   </div>
@@ -437,7 +441,7 @@ function Clear-OldRunFiles {
 # Run context: local writes transcript + report files; Azure Automation emits the report
 # into the output stream (no persistent filesystem).
 $script:IsAzureAutomationRun = Test-IsAzureAutomation
-$script:ScriptVersion = '3.1.2'
+$script:ScriptVersion = '3.1.3'
 $script:RunTimestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $script:LogsFolder = $null
 $script:ResultsFolder = $null
@@ -614,7 +618,11 @@ function Get-TenantSiteUrls {
         [Parameter()] [string] $ClientId = ''
     )
 
-    Write-Output "Connecting to tenant admin center: $AdminUrl ..."
+    # NOTE: this function returns the URL array, so it must not emit anything else to the
+    # success stream — any Write-Output here would be captured into the returned value and
+    # then processed as bogus 'sites'. Informational messages use Write-Verbose; the caller
+    # logs the discovered count.
+    Write-Verbose "Connecting to tenant admin center: $AdminUrl ..."
     if (Test-IsAzureAutomation) {
         if (-not [string]::IsNullOrEmpty($ClientId)) {
             Connect-PnPOnline -Url $AdminUrl -ManagedIdentity -ClientId $ClientId
@@ -632,8 +640,8 @@ function Get-TenantSiteUrls {
         if (-not [string]::IsNullOrWhiteSpace($Filter)) { $getParams['Filter'] = $Filter }
         $sites = Get-PnPTenantSite @getParams
         $urls = @($sites | Where-Object { $null -ne $_.Url } | Select-Object -ExpandProperty Url)
-        Write-Output "Discovered $($urls.Count) site collection(s) from the tenant."
-        return $urls
+        Write-Verbose "Discovered $($urls.Count) site collection(s) from the tenant."
+        return , [string[]]$urls
     }
     finally {
         Disconnect-PnPOnline
@@ -643,6 +651,7 @@ function Get-TenantSiteUrls {
 # Resolve the list of sites to process. For 'All' scope, enumerate the tenant first.
 if ($SiteScope -eq 'All') {
     Write-Output "--- SiteScope=All: enumerating tenant site collections ---"
+    Write-Output "Connecting to tenant admin center: $TenantAdminUrl ..."
     if ($WhatIfPreference) {
         Write-Warning "SiteScope=All applies the version policy across the whole tenant. Review the DryRun output carefully before a real run."
     }
@@ -652,6 +661,7 @@ if ($SiteScope -eq 'All') {
     catch {
         throw "Failed to enumerate tenant sites from ${TenantAdminUrl}: $($_.Exception.Message)"
     }
+    Write-Output "Discovered $(@($SiteUrls).Count) site collection(s) to process."
     if (@($SiteUrls).Count -eq 0) {
         Write-Warning "No site collections were returned from the tenant; nothing to process."
     }
@@ -751,12 +761,22 @@ app-only) may not be supported and can fail with an unauthorized error for site:
                     -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
                     -ExpireAfterDays $ExpireVersionsAfterDays
                 if ($hasDrift) {
-                    Write-Output "`tDrift detected. Applying site version policy..."
-                    Set-SiteVersionPolicy -SiteUrl $SiteUrl -Mode $VersionPolicyMode `
-                        -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
-                        -ExpireAfterDays $ExpireVersionsAfterDays -ApplyTo $ApplyTo
-                    Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'Applied' `
-                        -Detail "Major=$KeepMajorVersions; ExpireAfterDays=$ExpireVersionsAfterDays"
+                    if ($WhatIfPreference) {
+                        Write-Output "`tDrift detected. Would apply site version policy (DryRun; no change made)."
+                        Set-SiteVersionPolicy -SiteUrl $SiteUrl -Mode $VersionPolicyMode `
+                            -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
+                            -ExpireAfterDays $ExpireVersionsAfterDays -ApplyTo $ApplyTo
+                        Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'WouldApply' `
+                            -Detail "DryRun: would set Major=$KeepMajorVersions; ExpireAfterDays=$ExpireVersionsAfterDays"
+                    }
+                    else {
+                        Write-Output "`tDrift detected. Applying site version policy..."
+                        Set-SiteVersionPolicy -SiteUrl $SiteUrl -Mode $VersionPolicyMode `
+                            -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
+                            -ExpireAfterDays $ExpireVersionsAfterDays -ApplyTo $ApplyTo
+                        Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'Applied' `
+                            -Detail "Major=$KeepMajorVersions; ExpireAfterDays=$ExpireVersionsAfterDays"
+                    }
                 }
                 else {
                     Write-Output "`tNo drift. Site version policy already compliant; skipped."
@@ -824,9 +844,11 @@ if ($EnableReport -and -not $script:IsAzureAutomationRun -and $script:RunResults
 
 # Run summary line.
 $sumApplied = @($script:RunResults | Where-Object { $_.Outcome -eq 'Applied' }).Count
+$sumWouldApply = @($script:RunResults | Where-Object { $_.Outcome -eq 'WouldApply' }).Count
 $sumSkipped = @($script:RunResults | Where-Object { $_.Outcome -eq 'Skipped' -or $_.Outcome -eq 'Compliant' }).Count
 $sumFailed = @($script:RunResults | Where-Object { $_.Outcome -eq 'Failed' }).Count
-Write-Output "--- SPSCleanVersions finished: $($script:RunResults.Count) site(s) — $sumApplied applied, $sumSkipped skipped/compliant, $sumFailed failed ---"
+$appliedPart = if ($WhatIfPreference) { "$sumWouldApply would apply" } else { "$sumApplied applied" }
+Write-Output "--- SPSCleanVersions finished: $($script:RunResults.Count) site(s) — $appliedPart, $sumSkipped skipped/compliant, $sumFailed failed ---"
 
 if ($script:TranscriptStarted) {
     try { Stop-Transcript | Out-Null } catch { }

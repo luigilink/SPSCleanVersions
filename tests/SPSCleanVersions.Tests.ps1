@@ -472,6 +472,22 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'SiteFilter'
         }
 
+        It 'Should not pollute the enumerated site list with informational Write-Output' {
+            # Get-TenantSiteUrls must use Write-Verbose for status so its return value stays
+            # clean (a Write-Output there would be captured as bogus site URLs).
+            $scriptContent | Should -Match 'Write-Verbose "Connecting to tenant admin center'
+            $scriptContent | Should -Match 'return , \[string\[\]\]\$urls'
+        }
+
+        It 'Should record a simulated outcome in DryRun instead of Applied' {
+            $scriptContent | Should -Match "Outcome 'WouldApply'"
+            $scriptContent | Should -Match 'Would apply site version policy'
+        }
+
+        It 'Should report a would-apply count in the DryRun summary' {
+            $scriptContent | Should -Match 'would apply'
+        }
+
         Context 'Drift comparison (functional, real field shapes)' {
 
             BeforeAll {
@@ -620,6 +636,14 @@ Describe 'SPSCleanVersions Script' {
             It 'Shows a DryRun badge when DryRunMode is set' {
                 $html = Export-SPSCleanVersionsReport -Results $script:sample -Version '3.1.0' -DryRunMode:$true
                 $html | Should -Match 'DryRun'
+            }
+
+            It 'Uses a Would apply card in DryRun mode' {
+                $wa = New-Object System.Collections.Generic.List[object]
+                $wa.Add([PSCustomObject]@{ Site = 'https://x/sites/A'; Scope = 'ExpireAfter'; Outcome = 'WouldApply'; Detail = 'DryRun' })
+                $html = Export-SPSCleanVersionsReport -Results $wa -Version '3.1.3' -DryRunMode:$true
+                $html | Should -Match 'Would apply'
+                $html | Should -Match 'badge WouldApply'
             }
 
             It 'Marks the overall status ATTENTION when a site failed' {
