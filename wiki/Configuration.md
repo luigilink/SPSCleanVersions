@@ -53,6 +53,8 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 
 > **Important:** the site version policy modes require **SharePoint Administrator** privileges and a PnP connection that can call `Set-PnPSiteVersionPolicy`. Applying to **existing** libraries submits a background request that may take time to complete across a large site.
 
+> **Drift-based apply:** in the site version policy modes, the script first reads the current policy with `Get-PnPSiteVersionPolicy` and only calls `Set-PnPSiteVersionPolicy` when it differs from the desired settings (a *drift*). Sites that already match are logged as compliant and skipped. If the current policy cannot be read, the script fails safe and applies the policy anyway.
+
 ## Examples
 
 ### Apply an ExpireAfter site version policy

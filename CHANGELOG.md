@@ -18,11 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `-ApplyToNewDocumentLibraries` / `-ApplyToExistingDocumentLibraries`
   - Add `Set-SiteVersionPolicy` helper that builds the `Set-PnPSiteVersionPolicy`
     call per mode and honours `ShouldProcess` / `-WhatIf` / `DryRun`
+  - Add `Test-SiteVersionPolicyDrift`: the site version policy is applied only when
+    the current policy (read with `Get-PnPSiteVersionPolicy`) differs from the desired
+    settings; compliant sites are skipped. Reading fails safe — an unreadable current
+    policy is treated as a drift and applied
+  - Only pass `MajorWithMinorVersions` when the request targets existing document
+    libraries, per the `Set-PnPSiteVersionPolicy` constraint (it is rejected for a
+    new-libraries-only request when auto expiration is off)
 - SPSCleanVersions.Tests.ps1
-  - Add tests for the site version policy modes, `ApplyTo` mapping, and a functional
-    context validating the `ExpireVersionsAfterDays` rules
+  - Add tests for the site version policy modes, `ApplyTo` mapping, and functional
+    contexts validating the `ExpireVersionsAfterDays` rules and the drift comparison
+    against the real `Get-PnPSiteVersionPolicy` field shapes
 - Wiki Documentation
-  - Document `VersionPolicyMode`, `ExpireVersionsAfterDays` and `ApplyTo`
+  - Document `VersionPolicyMode`, `ExpireVersionsAfterDays`, `ApplyTo` and the
+    drift-based apply behaviour
 
 ## [3.0.0] - 2026-07-15
 
