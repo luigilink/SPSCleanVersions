@@ -59,6 +59,13 @@
                               'NoExpiration' forces 0.
       - ApplyTo               (string, optional, default: 'Both') — 'New', 'Existing' or 'Both'
                               document libraries (site version policy modes only).
+      - SiteScope             (string, optional, default: 'Selected') — 'Selected' processes
+                              SiteUrls; 'All' enumerates every site collection via Get-PnPTenantSite
+                              (site version policy modes only; requires TenantAdminUrl).
+      - TenantAdminUrl        (string, optional) — SharePoint admin center URL, required when
+                              SiteScope is 'All' (e.g. https://contoso-admin.sharepoint.com).
+      - SiteFilter            (string, optional) — server-side -Filter passed to Get-PnPTenantSite
+                              to narrow the enumeration when SiteScope is 'All'.
 
     .PARAMETER ConfigFile
     Path to a local JSON file containing the same configuration schema as -InputJson.
@@ -153,13 +160,35 @@ if ($config -isnot [System.Management.Automation.PSCustomObject]) {
     "Remove any surrounding single quotes or curly/smart quotes and paste the raw JSON object."
 }
 
-# Required: SiteUrls
-if (-not $config.PSObject.Properties['SiteUrls'] -or
-    $null -eq $config.SiteUrls -or
-    @($config.SiteUrls).Count -eq 0) {
-    throw "JSON property 'SiteUrls' is required and must contain at least one URL."
+# Site scope: 'Selected' processes the explicit SiteUrls; 'All' enumerates every site
+# collection in the tenant via Get-PnPTenantSite (requires TenantAdminUrl).
+$validScopes = @('Selected', 'All')
+[string]$SiteScope = if ($config.PSObject.Properties['SiteScope']) { [string]$config.SiteScope } else { 'Selected' }
+$matchedScope = $validScopes | Where-Object { $_ -ieq $SiteScope }
+if (-not $matchedScope) {
+    throw "Invalid 'SiteScope' value '$SiteScope'. Allowed values: $($validScopes -join ', ')."
 }
-[string[]]$SiteUrls = @($config.SiteUrls)
+$SiteScope = $matchedScope
+
+[string]$TenantAdminUrl = if ($config.PSObject.Properties['TenantAdminUrl']) { [string]$config.TenantAdminUrl } else { '' }
+[string]$SiteFilter     = if ($config.PSObject.Properties['SiteFilter'])     { [string]$config.SiteFilter }     else { '' }
+
+# SiteUrls is required for 'Selected' scope; for 'All' it is optional (sites are
+# enumerated from the tenant) and TenantAdminUrl becomes required instead.
+if ($SiteScope -eq 'Selected') {
+    if (-not $config.PSObject.Properties['SiteUrls'] -or
+        $null -eq $config.SiteUrls -or
+        @($config.SiteUrls).Count -eq 0) {
+        throw "JSON property 'SiteUrls' is required and must contain at least one URL (or set 'SiteScope' to 'All')."
+    }
+    [string[]]$SiteUrls = @($config.SiteUrls)
+}
+else {
+    if ([string]::IsNullOrWhiteSpace($TenantAdminUrl)) {
+        throw "JSON property 'TenantAdminUrl' is required when 'SiteScope' is 'All' (e.g. https://contoso-admin.sharepoint.com)."
+    }
+    [string[]]$SiteUrls = @()
+}
 
 # Optional with defaults
 [int]$KeepMajorVersions      = if ($config.PSObject.Properties['KeepMajorVersions'])      { $config.KeepMajorVersions }      else { 50 }
@@ -196,6 +225,12 @@ if ($ExpireVersionsAfterDays -ne 0 -and $ExpireVersionsAfterDays -lt 30) {
 }
 if ($VersionPolicyMode -eq 'ExpireAfter' -and $ExpireVersionsAfterDays -lt 30) {
     throw "VersionPolicyMode 'ExpireAfter' requires 'ExpireVersionsAfterDays' to be greater than or equal to 30."
+}
+
+# 'SiteScope: All' only makes sense for the site version policy modes; the Legacy
+# per-library path relies on an explicit SiteUrls list.
+if ($SiteScope -eq 'All' -and $VersionPolicyMode -eq 'Legacy') {
+    throw "'SiteScope' = 'All' is only supported with the site version policy modes (VersionPolicyMode: AutoExpiration, ExpireAfter, NoExpiration or InheritFromTenant), not 'Legacy'."
 }
 #endregion
 
@@ -359,6 +394,64 @@ function Set-SiteVersionPolicy {
     if ($PSCmdlet.ShouldProcess($SiteUrl, "Set site version policy ($Mode, ApplyTo=$ApplyTo)")) {
         Set-PnPSiteVersionPolicy @params -ErrorAction Stop
         Write-Output "`tSite version policy applied: Mode=$Mode; ApplyTo=$ApplyTo"
+    }
+}
+
+function Get-TenantSiteUrls {
+    <#
+        .SYNOPSIS
+        Connects to the tenant admin center and returns the URLs of all site collections
+        (OneDrive excluded), optionally narrowed by a server-side filter.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param
+    (
+        [Parameter(Mandatory = $true)] [string] $AdminUrl,
+        [Parameter()] [string] $Filter = '',
+        [Parameter()] [string] $ClientId = ''
+    )
+
+    Write-Output "Connecting to tenant admin center: $AdminUrl ..."
+    if (Test-IsAzureAutomation) {
+        if (-not [string]::IsNullOrEmpty($ClientId)) {
+            Connect-PnPOnline -Url $AdminUrl -ManagedIdentity -ClientId $ClientId
+        }
+        else {
+            Connect-PnPOnline -Url $AdminUrl -ManagedIdentity
+        }
+    }
+    else {
+        Connect-PnPOnline -Url $AdminUrl -Interactive -ClientId $ClientId
+    }
+
+    try {
+        $getParams = @{ ErrorAction = 'Stop' }
+        if (-not [string]::IsNullOrWhiteSpace($Filter)) { $getParams['Filter'] = $Filter }
+        $sites = Get-PnPTenantSite @getParams
+        $urls = @($sites | Where-Object { $null -ne $_.Url } | Select-Object -ExpandProperty Url)
+        Write-Output "Discovered $($urls.Count) site collection(s) from the tenant."
+        return $urls
+    }
+    finally {
+        Disconnect-PnPOnline
+    }
+}
+
+# Resolve the list of sites to process. For 'All' scope, enumerate the tenant first.
+if ($SiteScope -eq 'All') {
+    Write-Output "--- SiteScope=All: enumerating tenant site collections ---"
+    if ($WhatIfPreference) {
+        Write-Warning "SiteScope=All applies the version policy across the whole tenant. Review the DryRun output carefully before a real run."
+    }
+    try {
+        $SiteUrls = Get-TenantSiteUrls -AdminUrl $TenantAdminUrl -Filter $SiteFilter -ClientId $ClientId
+    }
+    catch {
+        throw "Failed to enumerate tenant sites from ${TenantAdminUrl}: $($_.Exception.Message)"
+    }
+    if (@($SiteUrls).Count -eq 0) {
+        Write-Warning "No site collections were returned from the tenant; nothing to process."
     }
 }
 
