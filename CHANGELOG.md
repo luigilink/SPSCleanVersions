@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     prevented the script — whose primary target is Azure Automation — from starting as
     a runbook. `-InputJson` and `-ConfigFile` are now plain optional parameters whose
     mutual exclusivity is validated in the body (exactly one is required)
+  - **Azure Automation runbook compatibility:** explicitly `Import-Module PnP.PowerShell`.
+    In a runbook the `#Requires -Modules` directive does not import the module and command
+    auto-loading is unreliable in the sandbox, so `Connect-PnPOnline` was *"not recognized"*;
+    the explicit import fixes this (harmless locally)
 
 ## [3.1.0] - 2026-07-15
 

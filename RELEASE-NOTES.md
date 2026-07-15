@@ -11,5 +11,9 @@
     the script from starting as a runbook. `-InputJson` and `-ConfigFile` are now plain
     optional parameters whose mutual exclusivity is validated in the body (exactly one
     is required)
+  - **Azure Automation runbook compatibility:** explicitly `Import-Module PnP.PowerShell`,
+    because in a runbook the `#Requires -Modules` directive does not import the module and
+    command auto-loading is unreliable in the sandbox (`Connect-PnPOnline` was *"not
+    recognized"*). Harmless locally
 
 A full list of changes in each version can be found in the [change log](CHANGELOG.md)
