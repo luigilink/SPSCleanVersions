@@ -267,6 +267,17 @@ if ($WhatIfPreference) {
 # Disable PnP PowerShell update check to avoid interactive prompts in non-interactive environments (Azure Automation).
 $env:PNPPOWERSHELL_UPDATECHECK = "false"
 
+# Explicitly import PnP.PowerShell. In Azure Automation runbooks the '#Requires -Modules'
+# directive does not import the module, and command auto-loading is unreliable in the
+# sandbox, so Connect-PnPOnline would otherwise be 'not recognized'. Harmless locally
+# (the module is simply loaded if not already).
+try {
+    Import-Module -Name PnP.PowerShell -ErrorAction Stop
+}
+catch {
+    throw "Unable to import the PnP.PowerShell module: $($_.Exception.Message). Ensure it is installed (locally) or imported into the Automation Account (Azure Automation)."
+}
+
 function Test-IsAzureAutomation {
     # In PS7.x, Azure Automation exposes several env vars (sandbox + managed identity endpoints).
     # Use multiple signals, not a single one.

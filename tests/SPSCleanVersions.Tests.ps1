@@ -258,6 +258,10 @@ Describe 'SPSCleanVersions Script' {
         It 'Should disable PnP PowerShell update check' {
             $scriptContent | Should -Match 'PNPPOWERSHELL_UPDATECHECK'
         }
+
+        It 'Should explicitly import the PnP.PowerShell module (runbook autoloading is unreliable)' {
+            $scriptContent | Should -Match 'Import-Module\s+-Name\s+PnP\.PowerShell'
+        }
     }
 
     Context 'Core logic patterns' {
