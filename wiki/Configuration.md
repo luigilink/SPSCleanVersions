@@ -53,6 +53,10 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 
 > **Important:** the site version policy modes require **SharePoint Administrator** privileges and a PnP connection that can call `Set-PnPSiteVersionPolicy`. Applying to **existing** libraries submits a background request that may take time to complete across a large site.
 
+> **Drift-based apply:** in the site version policy modes, the script first reads the current policy with `Get-PnPSiteVersionPolicy` and only calls `Set-PnPSiteVersionPolicy` when it differs from the desired settings (a *drift*). Sites that already match are logged as compliant and skipped. If the current policy cannot be read, the script fails safe and applies the policy anyway.
+
+> **⚠️ Azure Automation / app-only limitation:** `Get-PnPSiteVersionPolicy` and `Set-PnPSiteVersionPolicy` require a **delegated user context** that is **site collection administrator**. When running as an Azure Automation Runbook with a **Managed Identity** (app-only), there is no user context, so the site version policy modes may fail with an *"Attempted to perform an unauthorized operation"* error. The script emits a warning in that case. For tenant-wide version policy automation from a runbook, prefer the **tenant-level** settings (`Set-PnPTenant`) or run the site version policy modes **interactively / locally** with a SharePoint Administrator account. The default `Legacy` mode is unaffected.
+
 ## Examples
 
 ### Apply an ExpireAfter site version policy

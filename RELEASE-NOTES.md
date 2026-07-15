@@ -15,7 +15,14 @@
     `-ApplyToNewDocumentLibraries` / `-ApplyToExistingDocumentLibraries`
   - Add `Set-SiteVersionPolicy` helper that builds the `Set-PnPSiteVersionPolicy`
     call per mode and honours `ShouldProcess` / `-WhatIf` / `DryRun`
+  - Add `Test-SiteVersionPolicyDrift`: the site version policy is applied only when
+    the current policy (read with `Get-PnPSiteVersionPolicy`) differs from the desired
+    settings; compliant sites are skipped. Reading fails safe — an unreadable current
+    policy is treated as a drift and applied
+  - Only pass `MajorWithMinorVersions` when the request targets existing document
+    libraries, per the `Set-PnPSiteVersionPolicy` constraint
 - Wiki Documentation
-  - Document `VersionPolicyMode`, `ExpireVersionsAfterDays` and `ApplyTo`
+  - Document `VersionPolicyMode`, `ExpireVersionsAfterDays`, `ApplyTo` and the
+    drift-based apply behaviour
 
 A full list of changes in each version can be found in the [change log](CHANGELOG.md)
