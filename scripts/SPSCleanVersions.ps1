@@ -1,5 +1,5 @@
 <#PSScriptInfo
-    .VERSION 3.1.3
+    .VERSION 3.1.4
 
     .GUID 7ecf4acd-17c4-4c50-be79-1fcf2b6611fe
 
@@ -97,7 +97,7 @@
     FileName:	SPSCleanVersions.ps1
     Author:		Jean-Cyril DROUHIN
     Date:		July 15, 2026
-    Version:	3.1.3
+    Version:	3.1.4
 
     .LINK
     https://spjc.fr/
@@ -441,7 +441,7 @@ function Clear-OldRunFiles {
 # Run context: local writes transcript + report files; Azure Automation emits the report
 # into the output stream (no persistent filesystem).
 $script:IsAzureAutomationRun = Test-IsAzureAutomation
-$script:ScriptVersion = '3.1.3'
+$script:ScriptVersion = '3.1.4'
 $script:RunTimestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $script:LogsFolder = $null
 $script:ResultsFolder = $null
