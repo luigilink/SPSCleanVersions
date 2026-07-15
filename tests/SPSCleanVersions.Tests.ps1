@@ -575,6 +575,77 @@ Describe 'SPSCleanVersions Script' {
         }
     }
 
+    Context 'Logging and HTML report' {
+
+        It 'Should define the Export-SPSCleanVersionsReport function' {
+            $scriptContent | Should -Match 'function\s+Export-SPSCleanVersionsReport'
+        }
+
+        It 'Should define the ConvertTo-SPSHtmlEncoded helper' {
+            $scriptContent | Should -Match 'function\s+ConvertTo-SPSHtmlEncoded'
+        }
+
+        It 'Should collect per-site results with Add-RunResult' {
+            $scriptContent | Should -Match 'function\s+Add-RunResult'
+        }
+
+        It 'Should start a transcript for local runs' {
+            $scriptContent | Should -Match 'Start-Transcript'
+            $scriptContent | Should -Match 'Stop-Transcript'
+        }
+
+        It 'Should emit the HTML report to the output stream in Azure Automation' {
+            $scriptContent | Should -Match 'BEGIN SPSCleanVersions HTML report'
+        }
+
+        It 'Should default EnableReport to true' {
+            $scriptContent | Should -Match "EnableReport.*\`$true"
+        }
+
+        It 'Should prune old files with Clear-OldRunFiles' {
+            $scriptContent | Should -Match 'function\s+Clear-OldRunFiles'
+        }
+
+        Context 'Report generation (functional)' {
+
+            BeforeAll {
+                $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+                $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+                $wanted = 'ConvertTo-SPSHtmlEncoded', 'Export-SPSCleanVersionsReport'
+                $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
+                foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
+
+                $script:sample = New-Object System.Collections.Generic.List[object]
+                $script:sample.Add([PSCustomObject]@{ Site = 'https://x/sites/A'; Scope = 'ExpireAfter'; Outcome = 'Applied'; Detail = 'Major=100' })
+                $script:sample.Add([PSCustomObject]@{ Site = 'https://x/sites/B'; Scope = 'ExpireAfter'; Outcome = 'Skipped'; Detail = 'No drift' })
+                $script:sample.Add([PSCustomObject]@{ Site = 'https://x/sites/<C&D>'; Scope = 'Legacy'; Outcome = 'Failed'; Detail = 'boom "q" <t>' })
+            }
+
+            It 'Produces a self-contained HTML document' {
+                $html = Export-SPSCleanVersionsReport -Results $script:sample -Version '3.1.0'
+                $html | Should -Match '<!DOCTYPE html>'
+                $html | Should -Match 'Sites processed'
+            }
+
+            It 'HTML-encodes dangerous values (no injection)' {
+                $html = Export-SPSCleanVersionsReport -Results $script:sample -Version '3.1.0'
+                $html | Should -Match '&lt;C&amp;D&gt;'
+                $html | Should -Match '&quot;q&quot;'
+                $html | Should -Not -Match '<C&D>'
+            }
+
+            It 'Shows a DryRun badge when DryRunMode is set' {
+                $html = Export-SPSCleanVersionsReport -Results $script:sample -Version '3.1.0' -DryRunMode:$true
+                $html | Should -Match 'DryRun'
+            }
+
+            It 'Marks the overall status ATTENTION when a site failed' {
+                $html = Export-SPSCleanVersionsReport -Results $script:sample -Version '3.1.0'
+                $html | Should -Match 'ATTENTION'
+            }
+        }
+    }
+
     Context 'Error handling' {
 
         It 'Should use try/catch/finally pattern' {

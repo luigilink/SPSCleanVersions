@@ -24,7 +24,9 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
   "ApplyTo": "<string>",
   "SiteScope": "<string>",
   "TenantAdminUrl": "<string>",
-  "SiteFilter": "<string>"
+  "SiteFilter": "<string>",
+  "EnableReport": <boolean>,
+  "LogRetentionDays": <integer>
 }
 ```
 
@@ -44,6 +46,8 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 | `SiteScope` | string | No | `Selected` | `Selected` processes `SiteUrls`. `All` enumerates **every** site collection in the tenant via `Get-PnPTenantSite`. Site version policy modes only (not `Legacy`). See [Tenant-wide scope](#tenant-wide-scope-sitescope-all). |
 | `TenantAdminUrl` | string | Conditional | — | SharePoint admin center URL (e.g. `https://contoso-admin.sharepoint.com`). **Required** when `SiteScope` is `All`. |
 | `SiteFilter` | string | No | — | Optional server-side `-Filter` passed to `Get-PnPTenantSite` to narrow the enumeration when `SiteScope` is `All` (e.g. `"Url -like 'sales'"`). |
+| `EnableReport` | boolean | No | `true` | Generate an HTML report of the run. Local: written to `Results/`. Azure Automation: emitted to the output stream. |
+| `LogRetentionDays` | integer | No | `180` | Prune `Logs/` and `Results/` files older than this many days (local only). `0` disables pruning. |
 
 ## Version policy modes
 
@@ -81,6 +85,15 @@ By default (`SiteScope: Selected`) the script only processes the sites listed in
   "DryRun": true
 }
 ```
+
+## Logging and reports
+
+Every run produces a summary of what happened per site (**Applied** / **Skipped** / **Compliant** / **Failed**).
+
+- **Local execution:** a transcript is written to a `Logs/` folder and a self-contained HTML report (summary cards + a filterable table) to a `Results/` folder, both next to the script. Files older than `LogRetentionDays` (default 180) are pruned automatically. Set `"EnableReport": false` to skip the HTML report.
+- **Azure Automation:** there is no persistent filesystem, so the HTML report is emitted into the job **output stream** (between `--- BEGIN SPSCleanVersions HTML report ---` and `--- END ... ---`) instead of being written to disk.
+
+The report values are HTML-encoded, and a `DryRun` badge is shown when the run is a simulation.
 
 ## Examples
 

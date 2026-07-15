@@ -26,8 +26,11 @@
     the version policy across the tenant, still gated by the per-site drift check
   - Add a warning about the app-only (Azure Automation / Managed Identity) limitation of
     `Get-`/`Set-PnPSiteVersionPolicy`
+  - Add run logging (transcript to `Logs/` locally) and a self-contained HTML report
+    (summary cards + filterable table) written to `Results/` locally or emitted to the
+    output stream in Azure Automation. Add `EnableReport` and `LogRetentionDays` properties
 - Wiki Documentation
-  - Document `VersionPolicyMode`, `ExpireVersionsAfterDays`, `ApplyTo` and the
-    drift-based apply behaviour
+  - Document `VersionPolicyMode`, `ExpireVersionsAfterDays`, `ApplyTo`, `SiteScope`,
+    the drift-based apply behaviour and the logging/report options
 
 A full list of changes in each version can be found in the [change log](CHANGELOG.md)
