@@ -66,6 +66,10 @@
                               SiteScope is 'All' (e.g. https://contoso-admin.sharepoint.com).
       - SiteFilter            (string, optional) — server-side -Filter passed to Get-PnPTenantSite
                               to narrow the enumeration when SiteScope is 'All'.
+      - EnableReport          (boolean, optional, default: true) — generate an HTML report.
+                              Local: written to Results/. Azure Automation: emitted to the output stream.
+      - LogRetentionDays      (integer, optional, default: 180) — prune Logs/ and Results/ files
+                              older than this many days (local only). 0 disables pruning.
 
     .PARAMETER ConfigFile
     Path to a local JSON file containing the same configuration schema as -InputJson.
@@ -232,6 +236,10 @@ if ($VersionPolicyMode -eq 'ExpireAfter' -and $ExpireVersionsAfterDays -lt 30) {
 if ($SiteScope -eq 'All' -and $VersionPolicyMode -eq 'Legacy') {
     throw "'SiteScope' = 'All' is only supported with the site version policy modes (VersionPolicyMode: AutoExpiration, ExpireAfter, NoExpiration or InheritFromTenant), not 'Legacy'."
 }
+
+# Reporting / logging properties.
+[bool]$EnableReport      = if ($config.PSObject.Properties['EnableReport'])     { $config.EnableReport }     else { $true }
+[int]$LogRetentionDays   = if ($config.PSObject.Properties['LogRetentionDays']) { $config.LogRetentionDays } else { 180 }
 #endregion
 
 # When DryRun is specified, enable WhatIf mode so that ShouldProcess calls are simulated.
@@ -258,6 +266,155 @@ function Test-IsAzureAutomation {
         -not [string]::IsNullOrEmpty($env:MSI_ENDPOINT) -or
         -not [string]::IsNullOrEmpty($env:IDENTITY_ENDPOINT)
     )
+}
+
+#region --- Reporting helpers ---
+# Per-site result records collected during the run and rendered into the report.
+$script:RunResults = New-Object System.Collections.Generic.List[object]
+
+function Add-RunResult {
+    param(
+        [Parameter(Mandatory = $true)] [string] $SiteUrl,
+        [Parameter(Mandatory = $true)] [string] $Scope,
+        [Parameter(Mandatory = $true)] [string] $Outcome,
+        [Parameter()] [string] $Detail = ''
+    )
+    $script:RunResults.Add([PSCustomObject][ordered]@{
+            Site    = $SiteUrl
+            Scope   = $Scope
+            Outcome = $Outcome
+            Detail  = $Detail
+        })
+}
+
+function ConvertTo-SPSHtmlEncoded {
+    # HTML-encodes a value for safe insertion into the generated report.
+    param([Parameter(ValueFromPipeline = $true)][AllowNull()][AllowEmptyString()][string] $Value)
+    process {
+        if ([string]::IsNullOrEmpty($Value)) { return '' }
+        return [System.Net.WebUtility]::HtmlEncode($Value)
+    }
+}
+
+function Export-SPSCleanVersionsReport {
+    <#
+        .SYNOPSIS
+        Builds a self-contained (no CDN) HTML report from the collected run results and
+        returns it as a string. Summary cards plus a filterable table.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param
+    (
+        [Parameter(Mandatory = $true)] [System.Collections.IEnumerable] $Results,
+        [Parameter()] [string] $Title = 'SPSCleanVersions',
+        [Parameter()] [string] $Version = '',
+        [Parameter()] [bool] $DryRunMode = $false
+    )
+
+    $rows = @($Results)
+    $total = $rows.Count
+    $applied = @($rows | Where-Object { $_.Outcome -eq 'Applied' }).Count
+    $skipped = @($rows | Where-Object { $_.Outcome -eq 'Skipped' -or $_.Outcome -eq 'Compliant' }).Count
+    $failed = @($rows | Where-Object { $_.Outcome -eq 'Failed' }).Count
+    $generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $overall = if ($failed -gt 0) { 'ATTENTION' } else { 'OK' }
+    $overallClass = if ($failed -gt 0) { 'kpi-alert' } else { 'kpi-ok' }
+    $dryTag = if ($DryRunMode) { '<span class="kpi kpi-dry">DryRun</span>' } else { '' }
+
+    $css = @'
+:root{--brand:#1f6fb2;--ink:#222;--muted:#666;--line:#e3e3e3;--zebra:#f7f9fb;--ok-bg:#2e9b57;--alert-bg:#c0392b;--dry-bg:#c19c00}
+*{box-sizing:border-box}
+body{font-family:'Aptos','Segoe UI',-apple-system,BlinkMacSystemFont,sans-serif;color:var(--ink);margin:0;padding:24px;background:#fff}
+h1{color:var(--brand);font-size:22px;margin:0 0 4px}
+.meta{color:var(--muted);font-size:12px;margin-bottom:16px}
+.cards{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px}
+.card{background:#fff;border:1px solid var(--line);border-radius:6px;padding:12px 16px;min-width:120px}
+.card-value{font-size:24px;font-weight:700;color:var(--brand)}
+.card-label{font-size:12px;color:var(--muted)}
+.kpi{display:inline-block;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:700;color:#fff;margin-left:6px}
+.kpi-ok{background:var(--ok-bg)}.kpi-alert{background:var(--alert-bg)}.kpi-dry{background:var(--dry-bg);color:#222}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{background:var(--brand);color:#fff;position:sticky;top:0}
+tbody tr:nth-child(even){background:var(--zebra)}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;color:#fff}
+.badge.Applied{background:#1f6fb2}.badge.Skipped{background:#9aa4ad}.badge.Compliant{background:#9aa4ad}.badge.Failed{background:#c0392b}
+.search{padding:6px 10px;border:1px solid var(--line);border-radius:4px;font-size:13px;width:320px;max-width:100%;margin-bottom:12px}
+.footer{color:var(--muted);font-size:11px;margin-top:24px;border-top:1px solid var(--line);padding-top:8px}
+'@
+
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($r in $rows) {
+        $oc = ConvertTo-SPSHtmlEncoded ([string]$r.Outcome)
+        [void]$sb.Append('<tr><td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Site)) + '</td>')
+        [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Scope)) + '</td>')
+        [void]$sb.Append('<td><span class="badge ' + $oc + '">' + $oc + '</span></td>')
+        [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Detail)) + '</td></tr>')
+    }
+
+    $encTitle = ConvertTo-SPSHtmlEncoded $Title
+    $encVer = ConvertTo-SPSHtmlEncoded $Version
+    $page = @"
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>$encTitle</title><style>$css</style></head><body>
+<h1>$encTitle <span class="kpi $overallClass">$overall</span> $dryTag</h1>
+<div class="meta">Generated: $generated &middot; SPSCleanVersions $encVer</div>
+<div class="cards">
+<div class="card"><div class="card-value">$total</div><div class="card-label">Sites processed</div></div>
+<div class="card"><div class="card-value">$applied</div><div class="card-label">Applied</div></div>
+<div class="card"><div class="card-value">$skipped</div><div class="card-label">Skipped / compliant</div></div>
+<div class="card"><div class="card-value">$failed</div><div class="card-label">Failed</div></div>
+</div>
+<input id="spsSearch" class="search" placeholder="Filter rows...">
+<table><thead><tr><th>Site</th><th>Scope</th><th>Outcome</th><th>Detail</th></tr></thead><tbody id="spsBody">
+$($sb.ToString())
+</tbody></table>
+<div class="footer">Generated by SPSCleanVersions $encVer.</div>
+<script>
+(function(){var q=document.getElementById('spsSearch');q.addEventListener('input',function(){var t=q.value.toLowerCase();document.querySelectorAll('#spsBody tr').forEach(function(tr){tr.style.display=(t===''||tr.textContent.toLowerCase().indexOf(t)>-1)?'':'none';});});})();
+</script>
+</body></html>
+"@
+    return $page
+}
+
+function Clear-OldRunFiles {
+    # Prune Logs/Results files older than the retention window (local only).
+    param([string] $Path, [int] $Retention, [string] $Filter)
+    if ($Retention -le 0 -or -not (Test-Path $Path)) { return }
+    $cutoff = (Get-Date).AddDays(-$Retention)
+    Get-ChildItem -Path $Path -Filter $Filter -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -le $cutoff } |
+        ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue }
+}
+#endregion
+
+# Run context: local writes transcript + report files; Azure Automation emits the report
+# into the output stream (no persistent filesystem).
+$script:IsAzureAutomationRun = Test-IsAzureAutomation
+$script:ScriptVersion = '3.1.0'
+$script:RunTimestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+$script:LogsFolder = $null
+$script:ResultsFolder = $null
+$script:TranscriptStarted = $false
+
+if (-not $script:IsAzureAutomationRun) {
+    $scriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    $script:LogsFolder = Join-Path -Path $scriptRoot -ChildPath 'Logs'
+    $script:ResultsFolder = Join-Path -Path $scriptRoot -ChildPath 'Results'
+    foreach ($dir in @($script:LogsFolder, $script:ResultsFolder)) {
+        if (-not (Test-Path -Path $dir)) { $null = New-Item -Path $dir -ItemType Directory -Force }
+    }
+    Clear-OldRunFiles -Path $script:LogsFolder -Retention $LogRetentionDays -Filter '*.log'
+    Clear-OldRunFiles -Path $script:ResultsFolder -Retention $LogRetentionDays -Filter '*.html'
+    try {
+        $transcriptPath = Join-Path -Path $script:LogsFolder -ChildPath ("SPSCleanVersions-$($script:RunTimestamp).log")
+        Start-Transcript -Path $transcriptPath -IncludeInvocationHeader | Out-Null
+        $script:TranscriptStarted = $true
+    }
+    catch {
+        Write-Warning "Unable to start transcript: $($_.Exception.Message)"
+    }
 }
 
 function Test-SiteVersionPolicyDrift {
@@ -488,6 +645,7 @@ foreach ($SiteUrl in $SiteUrls) {
                 $_.RootFolder.ServerRelativeUrl -notlike "*/Style Library*" -and
                 $_.BaseTemplate -eq 101 # Document Libraries only
             }
+            $legacyApplied = 0; $legacyCompliant = 0; $legacyFailed = 0
             foreach ($list in $targetLists) {
                 $minorDesired = ($KeepMinorVersions -gt 0)
                 $changeNeeded = ($list.MajorVersionLimit -ne $KeepMajorVersions) -or
@@ -512,16 +670,22 @@ foreach ($SiteUrl in $SiteUrls) {
                         try {
                             Set-PnPList @p -ErrorAction Stop
                             Write-Output "`t$($list.Title) -> Major=$KeepMajorVersions; MinorEnabled=$minorDesired; MinorLimit=$KeepMinorVersions"
+                            $legacyApplied++
                         }
                         catch {
                             Write-Warning "`tFAILED $($list.Title): $($_.Exception.Message)"
+                            $legacyFailed++
                         }
                     }
                 }
                 else {
                     Write-Output "`t$($list.Title) already compliant"
+                    $legacyCompliant++
                 }
             }
+            $legacyOutcome = if ($legacyFailed -gt 0) { 'Failed' } elseif ($legacyApplied -gt 0) { 'Applied' } else { 'Compliant' }
+            Add-RunResult -SiteUrl $SiteUrl -Scope "Legacy (Major=$KeepMajorVersions,Minor=$KeepMinorVersions)" -Outcome $legacyOutcome `
+                -Detail "$legacyApplied applied, $legacyCompliant compliant, $legacyFailed failed across $(@($targetLists).Count) libraries"
         }
         else {
             # --- Site version policy mode: Set-PnPSiteVersionPolicy at the site level ---
@@ -546,13 +710,17 @@ app-only) may not be supported and can fail with an unauthorized error for site:
                     Set-SiteVersionPolicy -SiteUrl $SiteUrl -Mode $VersionPolicyMode `
                         -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
                         -ExpireAfterDays $ExpireVersionsAfterDays -ApplyTo $ApplyTo
+                    Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'Applied' `
+                        -Detail "Major=$KeepMajorVersions; ExpireAfterDays=$ExpireVersionsAfterDays"
                 }
                 else {
                     Write-Output "`tNo drift. Site version policy already compliant; skipped."
+                    Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'Skipped' -Detail 'No drift; already compliant'
                 }
             }
             catch {
                 Write-Warning "`tFAILED to apply site version policy on ${SiteUrl}: $($_.Exception.Message)"
+                Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'Failed' -Detail $_.Exception.Message
             }
         }
 
@@ -585,8 +753,43 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
     }
     catch {
         Write-Error "Failed to process site $SiteUrl : $($_.Exception.Message)"
+        Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'Failed' -Detail $_.Exception.Message
     }
     finally {
         Disconnect-PnPOnline
     }
 }
+
+#region --- Report output ---
+if ($EnableReport -and $script:RunResults.Count -gt 0) {
+    $reportHtml = Export-SPSCleanVersionsReport -Results $script:RunResults `
+        -Title 'SPSCleanVersions' -Version $script:ScriptVersion -DryRunMode:$WhatIfPreference
+
+    if ($script:IsAzureAutomationRun) {
+        # No persistent filesystem in Azure Automation: emit the HTML into the output stream.
+        Write-Output '--- BEGIN SPSCleanVersions HTML report ---'
+        Write-Output $reportHtml
+        Write-Output '--- END SPSCleanVersions HTML report ---'
+    }
+    else {
+        try {
+            $reportPath = Join-Path -Path $script:ResultsFolder -ChildPath ("SPSCleanVersions-$($script:RunTimestamp).html")
+            Set-Content -Path $reportPath -Value $reportHtml -Encoding UTF8 -Force
+            Write-Output "HTML report written to: $reportPath"
+        }
+        catch {
+            Write-Warning "Unable to write HTML report: $($_.Exception.Message)"
+        }
+    }
+}
+
+# Run summary line.
+$sumApplied = @($script:RunResults | Where-Object { $_.Outcome -eq 'Applied' }).Count
+$sumSkipped = @($script:RunResults | Where-Object { $_.Outcome -eq 'Skipped' -or $_.Outcome -eq 'Compliant' }).Count
+$sumFailed = @($script:RunResults | Where-Object { $_.Outcome -eq 'Failed' }).Count
+Write-Output "--- SPSCleanVersions finished: $($script:RunResults.Count) site(s) — $sumApplied applied, $sumSkipped skipped/compliant, $sumFailed failed ---"
+
+if ($script:TranscriptStarted) {
+    try { Stop-Transcript | Out-Null } catch { }
+}
+#endregion
