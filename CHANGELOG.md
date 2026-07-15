@@ -34,13 +34,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Add a warning about the app-only (Azure Automation / Managed Identity) limitation
     of `Get-`/`Set-PnPSiteVersionPolicy`, which require a delegated site-collection-admin
     context
+  - Add run logging and a self-contained HTML report: a per-site result
+    (Applied / Skipped / Compliant / Failed) is collected and rendered as a
+    dependency-free HTML report (summary cards + filterable table, HTML-encoded).
+    Local runs write a transcript to `Logs/` and the report to `Results/`;
+    Azure Automation emits the HTML into the output stream. Add `EnableReport`
+    (default `true`) and `LogRetentionDays` (default `180`) properties
 - SPSCleanVersions.Tests.ps1
   - Add tests for the site version policy modes, `ApplyTo` mapping, and functional
-    contexts validating the `ExpireVersionsAfterDays` rules and the drift comparison
-    against the real `Get-PnPSiteVersionPolicy` field shapes
+    contexts validating the `ExpireVersionsAfterDays` rules, the drift comparison
+    against the real `Get-PnPSiteVersionPolicy` field shapes, and the HTML report
+    generation
 - Wiki Documentation
-  - Document `VersionPolicyMode`, `ExpireVersionsAfterDays`, `ApplyTo` and the
-    drift-based apply behaviour
+  - Document `VersionPolicyMode`, `ExpireVersionsAfterDays`, `ApplyTo`, `SiteScope`,
+    the drift-based apply behaviour and the logging/report options
 
 ## [3.0.0] - 2026-07-15
 
