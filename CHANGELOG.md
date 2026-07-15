@@ -3,6 +3,27 @@
 The format is based on and uses the types of changes according to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-07-15
+
+### Added
+
+- SPSCleanVersions.ps1
+  - Add `VersionPolicyMode` property selecting the version policy mechanism:
+    `Legacy` (default) keeps the per-library count-based `Set-PnPList` behaviour;
+    `AutoExpiration`, `ExpireAfter`, `NoExpiration` and `InheritFromTenant` drive
+    `Set-PnPSiteVersionPolicy` at the site level (the modern version-history model)
+  - Add `ExpireVersionsAfterDays` (for `ExpireAfter`, must be >= 30; `NoExpiration`
+    forces 0) with validation, addressing the customer request for version expiration
+  - Add `ApplyTo` (`New` / `Existing` / `Both`, default `Both`) mapping to
+    `-ApplyToNewDocumentLibraries` / `-ApplyToExistingDocumentLibraries`
+  - Add `Set-SiteVersionPolicy` helper that builds the `Set-PnPSiteVersionPolicy`
+    call per mode and honours `ShouldProcess` / `-WhatIf` / `DryRun`
+- SPSCleanVersions.Tests.ps1
+  - Add tests for the site version policy modes, `ApplyTo` mapping, and a functional
+    context validating the `ExpireVersionsAfterDays` rules
+- Wiki Documentation
+  - Document `VersionPolicyMode`, `ExpireVersionsAfterDays` and `ApplyTo`
+
 ## [3.0.0] - 2026-07-15
 
 ### Added

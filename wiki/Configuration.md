@@ -18,7 +18,10 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
   "KeepMinorVersions": <integer>,
   "ClientId": "<string>",
   "ForceDeleteOldVersions": <boolean>,
-  "DryRun": <boolean>
+  "DryRun": <boolean>,
+  "VersionPolicyMode": "<string>",
+  "ExpireVersionsAfterDays": <integer>,
+  "ApplyTo": "<string>"
 }
 ```
 
@@ -27,13 +30,63 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 | Property | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `SiteUrls` | string[] | **Yes** | — | One or more SharePoint Site Collection URLs to process. |
-| `KeepMajorVersions` | integer | No | `50` | Maximum number of major versions to retain per document. |
-| `KeepMinorVersions` | integer | No | `0` | Maximum number of minor versions to retain per document. Set to `0` to disable minor versioning. |
+| `KeepMajorVersions` | integer | No | `50` | Maximum number of major versions to retain. Maps to `-MajorVersions` in the site version policy modes. |
+| `KeepMinorVersions` | integer | No | `0` | Maximum number of minor versions to retain. Set to `0` to disable minor versioning. Maps to `-MajorWithMinorVersions` in the site version policy modes. |
 | `ClientId` | string | No | — | Azure AD App Registration Client ID used for authentication. Required for Interactive login (local) and optional for Managed Identity (Azure Automation). |
 | `ForceDeleteOldVersions` | boolean | No | `false` | When `true`, submits a batch delete job via `New-PnPSiteFileVersionBatchDeleteJob` to remove file versions exceeding the configured limits. **Requires delegated user context** — automatically skipped in Azure Automation. |
 | `DryRun` | boolean | No | `false` | When `true`, simulates all changes without applying them. Use this instead of `-WhatIf` when running as an Azure Automation Runbook. |
+| `VersionPolicyMode` | string | No | `Legacy` | Version policy mechanism. `Legacy` keeps the per-library count-based `Set-PnPList` behaviour. `AutoExpiration`, `ExpireAfter`, `NoExpiration` and `InheritFromTenant` apply a site-level policy via `Set-PnPSiteVersionPolicy`. See [Version policy modes](#version-policy-modes). |
+| `ExpireVersionsAfterDays` | integer | No | `0` | Number of days after which versions expire. Used by `ExpireAfter` (must be **>= 30**). `NoExpiration` forces `0`. |
+| `ApplyTo` | string | No | `Both` | `New`, `Existing` or `Both` document libraries. Maps to `-ApplyToNewDocumentLibraries` / `-ApplyToExistingDocumentLibraries`. Site version policy modes only. |
+
+## Version policy modes
+
+`VersionPolicyMode` selects how versioning is configured:
+
+| Mode | Mechanism | Effect |
+|---|---|---|
+| `Legacy` (default) | `Set-PnPList` per document library | Count-based major/minor limits, applied library by library. Backward compatible with earlier versions. |
+| `AutoExpiration` | `Set-PnPSiteVersionPolicy -EnableAutoExpirationVersionTrim $true` | SharePoint automatically trims versions (Microsoft-recommended). |
+| `ExpireAfter` | `Set-PnPSiteVersionPolicy -EnableAutoExpirationVersionTrim $false -ExpireVersionsAfterDays <n> -MajorVersions <n> [-MajorWithMinorVersions <n>]` | Versions expire after `ExpireVersionsAfterDays` (>= 30) and are capped by the major/minor counts. |
+| `NoExpiration` | `Set-PnPSiteVersionPolicy -EnableAutoExpirationVersionTrim $false -ExpireVersionsAfterDays 0 -MajorVersions <n>` | No expiration; only the major version count caps history. |
+| `InheritFromTenant` | `Set-PnPSiteVersionPolicy -InheritFromTenant` | Clears the site-level setting so libraries follow the tenant default. |
+
+> **Important:** the site version policy modes require **SharePoint Administrator** privileges and a PnP connection that can call `Set-PnPSiteVersionPolicy`. Applying to **existing** libraries submits a background request that may take time to complete across a large site.
 
 ## Examples
+
+### Apply an ExpireAfter site version policy
+
+Versions expire after 180 days, keeping up to 100 major versions, applied to new and existing document libraries.
+
+```json
+{
+  "SiteUrls": [
+    "https://contoso.sharepoint.com/sites/News"
+  ],
+  "VersionPolicyMode": "ExpireAfter",
+  "ExpireVersionsAfterDays": 180,
+  "KeepMajorVersions": 100,
+  "ApplyTo": "Both"
+}
+```
+
+```powershell
+.\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/News"],"VersionPolicyMode":"ExpireAfter","ExpireVersionsAfterDays":180,"KeepMajorVersions":100}'
+```
+
+### Inherit the tenant version policy
+
+Clears any site-level override so document libraries follow the tenant default.
+
+```json
+{
+  "SiteUrls": [
+    "https://contoso.sharepoint.com/sites/News"
+  ],
+  "VersionPolicyMode": "InheritFromTenant"
+}
+```
 
 ### File-based configuration (local execution)
 

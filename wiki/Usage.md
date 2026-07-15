@@ -71,6 +71,16 @@ Set `"ForceDeleteOldVersions": true` to submit a batch delete job that removes o
 .\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/News"],"KeepMajorVersions":50,"ForceDeleteOldVersions":true,"DryRun":true}'
 ```
 
+### Example 5: Apply a site version policy with expiration
+
+Set `"VersionPolicyMode"` to a site-level mode to apply a policy via `Set-PnPSiteVersionPolicy`. The example below expires versions after 180 days and keeps up to 100 major versions, on new and existing libraries.
+
+```powershell
+.\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/News"],"VersionPolicyMode":"ExpireAfter","ExpireVersionsAfterDays":180,"KeepMajorVersions":100,"ApplyTo":"Both"}'
+```
+
+> **Note:** `ExpireVersionsAfterDays` must be `0` (no expiration) or `>= 30`. See [Configuration](./Configuration#version-policy-modes) for all modes.
+
 ## Error Handling
 
 Ensure the provided credentials have access to the SharePoint Sites.
