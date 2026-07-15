@@ -1,5 +1,5 @@
 <#PSScriptInfo
-    .VERSION 3.1.1
+    .VERSION 3.1.2
 
     .GUID 7ecf4acd-17c4-4c50-be79-1fcf2b6611fe
 
@@ -66,8 +66,8 @@
                               SiteScope is 'All' (e.g. https://contoso-admin.sharepoint.com).
       - SiteFilter            (string, optional) — server-side -Filter passed to Get-PnPTenantSite
                               to narrow the enumeration when SiteScope is 'All'.
-      - EnableReport          (boolean, optional, default: true) — generate an HTML report.
-                              Local: written to Results/. Azure Automation: emitted to the output stream.
+      - EnableReport          (boolean, optional, default: true) — write a local HTML report
+                              to Results/ (local execution only; not produced in Azure Automation).
       - LogRetentionDays      (integer, optional, default: 180) — prune Logs/ and Results/ files
                               older than this many days (local only). 0 disables pruning.
 
@@ -97,7 +97,7 @@
     FileName:	SPSCleanVersions.ps1
     Author:		Jean-Cyril DROUHIN
     Date:		July 15, 2026
-    Version:	3.1.1
+    Version:	3.1.2
 
     .LINK
     https://spjc.fr/
@@ -437,7 +437,7 @@ function Clear-OldRunFiles {
 # Run context: local writes transcript + report files; Azure Automation emits the report
 # into the output stream (no persistent filesystem).
 $script:IsAzureAutomationRun = Test-IsAzureAutomation
-$script:ScriptVersion = '3.1.1'
+$script:ScriptVersion = '3.1.2'
 $script:RunTimestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $script:LogsFolder = $null
 $script:ResultsFolder = $null
@@ -806,25 +806,19 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
 }
 
 #region --- Report output ---
-if ($EnableReport -and $script:RunResults.Count -gt 0) {
+# The HTML report is a local artifact only. In Azure Automation there is no persistent
+# filesystem and dumping the HTML into the job output stream makes the log unreadable, so
+# the report is simply not produced there (the run summary below is still printed).
+if ($EnableReport -and -not $script:IsAzureAutomationRun -and $script:RunResults.Count -gt 0) {
     $reportHtml = Export-SPSCleanVersionsReport -Results $script:RunResults `
         -Title 'SPSCleanVersions' -Version $script:ScriptVersion -DryRunMode:$WhatIfPreference
-
-    if ($script:IsAzureAutomationRun) {
-        # No persistent filesystem in Azure Automation: emit the HTML into the output stream.
-        Write-Output '--- BEGIN SPSCleanVersions HTML report ---'
-        Write-Output $reportHtml
-        Write-Output '--- END SPSCleanVersions HTML report ---'
+    try {
+        $reportPath = Join-Path -Path $script:ResultsFolder -ChildPath ("SPSCleanVersions-$($script:RunTimestamp).html")
+        Set-Content -Path $reportPath -Value $reportHtml -Encoding UTF8 -Force
+        Write-Output "HTML report written to: $reportPath"
     }
-    else {
-        try {
-            $reportPath = Join-Path -Path $script:ResultsFolder -ChildPath ("SPSCleanVersions-$($script:RunTimestamp).html")
-            Set-Content -Path $reportPath -Value $reportHtml -Encoding UTF8 -Force
-            Write-Output "HTML report written to: $reportPath"
-        }
-        catch {
-            Write-Warning "Unable to write HTML report: $($_.Exception.Message)"
-        }
+    catch {
+        Write-Warning "Unable to write HTML report: $($_.Exception.Message)"
     }
 }
 
