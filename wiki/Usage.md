@@ -19,9 +19,18 @@ This tool relies on the PnP.PowerShell module version 2.12.0 or later. [Installa
 * **Role:** SharePoint Administrator or Global Administrator.
 * **API Permissions:** `Sites.FullControl.All` (when using App Registration).
 
-## Parameter: `-InputJson`
+## Parameters
 
-All configuration is passed as a single JSON string. Supported properties:
+The script accepts its configuration from one of two mutually exclusive sources:
+
+| Parameter | Type | Parameter Set | Description |
+|---|---|---|---|
+| `-InputJson` | string | InlineJson (default) | Inline JSON string with all configuration. Ideal for Azure Automation Runbooks. |
+| `-ConfigFile` | string | ConfigFile | Path to a local JSON file with the same schema. Ideal for local execution and testing. |
+
+### JSON schema (shared by both sources)
+
+All configuration is expressed as JSON. Supported properties:
 
 | Property | Type | Required | Default | Description |
 |---|---|---|---|---|
@@ -40,13 +49,19 @@ All configuration is passed as a single JSON string. Supported properties:
 .\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/News"],"KeepMajorVersions":50}' -WhatIf
 ```
 
-### Example 2: Multiple Sites with DryRun (Azure Automation Runbook)
+### Example 2: Local run from a JSON config file
+
+```powershell
+.\SPSCleanVersions.ps1 -ConfigFile '.\Config\contoso-PROD.json'
+```
+
+### Example 3: Multiple Sites with DryRun (Azure Automation Runbook)
 
 ```powershell
 .\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/News","https://contoso.sharepoint.com/sites/HR"],"KeepMajorVersions":50,"DryRun":true}'
 ```
 
-### Example 3: Force Deletion of Old File Version History
+### Example 4: Force Deletion of Old File Version History
 
 Set `"ForceDeleteOldVersions": true` to submit a batch delete job that removes old file versions exceeding the configured limits via `New-PnPSiteFileVersionBatchDeleteJob`.
 

@@ -3,6 +3,32 @@
 The format is based on and uses the types of changes according to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-07-15
+
+### Added
+
+- SPSCleanVersions.ps1
+  - Add `-ConfigFile` parameter (separate parameter set) to load configuration
+    from a local JSON file for local execution and testing. `-InputJson` remains
+    the inline-string input for Azure Automation Runbooks; both sources share the
+    same `ConvertFrom-Json` parsing and validation
+  - Add `DefaultParameterSetName = 'InlineJson'` to `CmdletBinding` and split
+    `-InputJson` / `-ConfigFile` into mutually exclusive parameter sets
+  - Add missing-file and empty-file guards for `-ConfigFile`
+- Config/SPSCleanVersions.example.json
+  - Add example JSON configuration template for the `-ConfigFile` parameter
+- SPSCleanVersions.Tests.ps1
+  - Add tests for the two mutually exclusive parameter sets and the config-file
+    loading branch (Get-Content, missing-file guard, parameter-set switch)
+- Wiki Documentation
+  - Document the `-ConfigFile` parameter and the file-based configuration workflow
+
+### Changed
+
+- .gitignore
+  - Ignore real `Config/*.json` files (only `*.example.json` is tracked) and local
+    `Logs/` and `Results/` run artifacts
+
 ## [2.0.1] - 2026-03-03
 
 ### Changed

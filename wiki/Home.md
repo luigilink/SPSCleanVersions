@@ -4,7 +4,7 @@ SPSCleanVersions is a PowerShell script tool to clean Version History in your Sh
 
 ## Key Features
 
-* **Single JSON Input:** All configuration is passed via a single `-InputJson` string parameter, ensuring full compatibility with Azure Automation Runbooks.
+* **Two Config Sources:** Pass configuration inline via `-InputJson` (ideal for Azure Automation Runbooks) or from a local JSON file via `-ConfigFile` (ideal for local execution and testing). Both share the same JSON schema and validation.
 * **Simulation Mode:** Use `"DryRun": true` in the JSON (or `-WhatIf` locally) to preview changes safely.
 * **Flexible Retention:** Define custom thresholds for major and minor versions.
 * **Multi-Site Processing:** Pass multiple Site Collection URLs in the `SiteUrls` JSON array to process them in a single execution.

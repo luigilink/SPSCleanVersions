@@ -1,5 +1,5 @@
 <#PSScriptInfo
-    .VERSION 2.0.1
+    .VERSION 3.0.0
 
     .GUID 7ecf4acd-17c4-4c50-be79-1fcf2b6611fe
 
@@ -37,16 +37,26 @@
     A script tool to clean Version History in your SharePoint Tenant.
     Optimize your storage costs by managing major and minor versions across libraries and lists.
     Compatible with Local execution and Azure Automation Runbooks.
-    Accepts a single JSON string parameter for full Azure Automation Runbook compatibility.
+    Configuration is provided either as an inline JSON string (-InputJson, ideal for
+    Azure Automation Runbooks) or as a local JSON file (-ConfigFile, ideal for local
+    execution and testing). Both sources share the same schema, parsing and validation.
 
     .PARAMETER InputJson
-    A JSON string containing all configuration. Supported properties:
+    A JSON string containing all configuration. Ideal for Azure Automation Runbooks,
+    where the string is pasted directly into the runbook parameter field. Supported
+    properties:
       - SiteUrls              (string array, required) — Site Collection URLs to process.
       - KeepMajorVersions     (integer, optional, default: 50) — Number of major versions to keep.
       - KeepMinorVersions     (integer, optional, default: 0) — Number of minor versions to keep.
       - ClientId              (string, optional) — Azure AD App Registration Client ID.
       - ForceDeleteOldVersions (boolean, optional, default: false) — Trigger batch delete of old file versions.
       - DryRun                (boolean, optional, default: false) — Simulate changes without applying them.
+
+    .PARAMETER ConfigFile
+    Path to a local JSON file containing the same configuration schema as -InputJson.
+    Ideal for local execution and testing. The file is read and parsed with
+    ConvertFrom-Json. Mutually exclusive with -InputJson. See
+    Config/SPSCleanVersions.example.json for a template.
 
     .EXAMPLE
     .\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/site1"],"KeepMajorVersions":100,"KeepMinorVersions":10}'
@@ -56,11 +66,15 @@
     .\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/site1","https://contoso.sharepoint.com/sites/site2"],"KeepMajorVersions":50,"DryRun":true}'
     Simulates the operation on multiple sites without making changes.
 
+    .EXAMPLE
+    .\SPSCleanVersions.ps1 -ConfigFile '.\Config\contoso-PROD.json'
+    Loads all configuration from a local JSON file. Ideal for local execution and testing.
+
     .NOTES
     FileName:	SPSCleanVersions.ps1
     Author:		Jean-Cyril DROUHIN
-    Date:		March 3, 2026
-    Version:	2.0.1
+    Date:		July 15, 2026
+    Version:	3.0.0
 
     .LINK
     https://spjc.fr/
@@ -70,18 +84,39 @@
 #Requires -PSEdition Core
 #Requires -Modules @{ ModuleName = 'PnP.PowerShell'; ModuleVersion = '2.12.0' }
 
-[CmdletBinding(SupportsShouldProcess)]
+[CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'InlineJson')]
 param
 (
-    [Parameter(Mandatory = $true, HelpMessage = "JSON string containing all configuration (SiteUrls, KeepMajorVersions, KeepMinorVersions, ClientId, ForceDeleteOldVersions, DryRun)")]
+    [Parameter(Mandatory = $true, ParameterSetName = 'InlineJson', HelpMessage = "JSON string containing all configuration (SiteUrls, KeepMajorVersions, KeepMinorVersions, ClientId, ForceDeleteOldVersions, DryRun)")]
     [ValidateNotNullOrEmpty()]
     [System.String]
-    $InputJson
+    $InputJson,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'ConfigFile', HelpMessage = "Path to a local JSON configuration file (same schema as -InputJson)")]
+    [ValidateNotNullOrEmpty()]
+    [System.String]
+    $ConfigFile
 )
 
-#region --- Parse and validate JSON input ---
+#region --- Load and parse JSON input ---
+# Configuration comes either from an inline JSON string (-InputJson, Azure Automation
+# Runbooks) or from a local JSON file (-ConfigFile, local execution). Both converge on
+# the same ConvertFrom-Json parsing and validation below.
+if ($PSCmdlet.ParameterSetName -eq 'ConfigFile') {
+    if (-not (Test-Path -Path $ConfigFile -PathType Leaf)) {
+        throw "Configuration file not found: $ConfigFile"
+    }
+    $rawJson = Get-Content -Path $ConfigFile -Raw -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($rawJson)) {
+        throw "Configuration file is empty: $ConfigFile"
+    }
+}
+else {
+    $rawJson = $InputJson
+}
+
 try {
-    $config = $InputJson | ConvertFrom-Json -ErrorAction Stop
+    $config = $rawJson | ConvertFrom-Json -ErrorAction Stop
 }
 catch {
     throw "Invalid JSON input: $($_.Exception.Message)"
