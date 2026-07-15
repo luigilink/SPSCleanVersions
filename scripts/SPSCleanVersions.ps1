@@ -115,11 +115,30 @@ else {
     $rawJson = $InputJson
 }
 
+# Normalize the raw input to catch the most common copy/paste mistakes:
+#   - surrounding whitespace,
+#   - a wrapping pair of single quotes ('...') copied from a PowerShell command line,
+#     which ConvertFrom-Json would otherwise silently parse as a JSON string value.
+$rawJson = $rawJson.Trim()
+if ($rawJson.Length -ge 2 -and $rawJson.StartsWith("'") -and $rawJson.EndsWith("'")) {
+    $rawJson = $rawJson.Substring(1, $rawJson.Length - 2).Trim()
+}
+
 try {
     $config = $rawJson | ConvertFrom-Json -ErrorAction Stop
 }
 catch {
-    throw "Invalid JSON input: $($_.Exception.Message)"
+    throw "Invalid JSON input: $($_.Exception.Message). Ensure you pasted raw JSON (an object starting with '{'), " +
+    "with straight double quotes and no surrounding single or curly quotes."
+}
+
+# ConvertFrom-Json accepts scalars and arrays at the root. A valid configuration must
+# be a JSON object; anything else (string, number, array) means the input was wrapped
+# in quotes or is otherwise not the expected shape, which would surface later as a
+# misleading 'SiteUrls is required' error. Fail early with an actionable message.
+if ($config -isnot [System.Management.Automation.PSCustomObject]) {
+    throw "InputJson must be a JSON object (starting with '{'), but a $($config.GetType().Name) value was parsed. " +
+    "Remove any surrounding single quotes or curly/smart quotes and paste the raw JSON object."
 }
 
 # Required: SiteUrls

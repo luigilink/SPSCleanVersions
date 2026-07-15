@@ -176,6 +176,75 @@ Describe 'SPSCleanVersions Script' {
         It 'Should branch on the ConfigFile parameter set' {
             $scriptContent | Should -Match "ParameterSetName\s+-eq\s+'ConfigFile'"
         }
+
+        It 'Should trim the raw input before parsing' {
+            $scriptContent | Should -Match '\$rawJson\s*=\s*\$rawJson\.Trim\(\)'
+        }
+
+        It 'Should strip a wrapping pair of single quotes' {
+            $scriptContent | Should -Match 'StartsWith'
+            $scriptContent | Should -Match 'EndsWith'
+            $scriptContent | Should -Match 'Substring\(1, \$rawJson\.Length - 2\)'
+        }
+
+        It 'Should reject non-object JSON input' {
+            $scriptContent | Should -Match 'InputJson must be a JSON object'
+        }
+
+        It 'Should check the parsed config is a PSCustomObject' {
+            $scriptContent | Should -Match '\$config\s+-isnot\s+\[System\.Management\.Automation\.PSCustomObject\]'
+        }
+    }
+
+    Context 'JSON parsing behaviour (functional)' {
+
+        BeforeAll {
+            # Reproduce the script's normalization + parsing + object guard in isolation,
+            # so the behaviour is validated without importing PnP.PowerShell.
+            function Invoke-ParseConfig {
+                param([string]$rawJson)
+                $rawJson = $rawJson.Trim()
+                if ($rawJson.Length -ge 2 -and $rawJson.StartsWith("'") -and $rawJson.EndsWith("'")) {
+                    $rawJson = $rawJson.Substring(1, $rawJson.Length - 2).Trim()
+                }
+                try {
+                    $config = $rawJson | ConvertFrom-Json -ErrorAction Stop
+                }
+                catch {
+                    throw "Invalid JSON input: $($_.Exception.Message)."
+                }
+                if ($config -isnot [System.Management.Automation.PSCustomObject]) {
+                    throw "InputJson must be a JSON object, but a $($config.GetType().Name) value was parsed."
+                }
+                return $config
+            }
+        }
+
+        It 'Parses a clean JSON object' {
+            $c = Invoke-ParseConfig '{"SiteUrls":["https://contoso.sharepoint.com/teams/CSSC"],"KeepMajorVersions":100}'
+            @($c.SiteUrls).Count | Should -Be 1
+        }
+
+        It 'Auto-corrects input wrapped in single quotes' {
+            $wrapped = "'{`"SiteUrls`":[`"https://contoso.sharepoint.com/teams/CSSC`"]}'"
+            $c = Invoke-ParseConfig $wrapped
+            @($c.SiteUrls).Count | Should -Be 1
+        }
+
+        It 'Tolerates leading and trailing whitespace' {
+            $c = Invoke-ParseConfig '   {"SiteUrls":["https://x/teams/CSSC"]}   '
+            @($c.SiteUrls).Count | Should -Be 1
+        }
+
+        It 'Rejects curly/smart quotes with an Invalid JSON message' {
+            $l = [char]0x201C; $r = [char]0x201D
+            $curly = "{$($l)SiteUrls$($r):[$($l)https://x/teams/CSSC$($r)]}"
+            { Invoke-ParseConfig $curly } | Should -Throw -ExpectedMessage 'Invalid JSON input*'
+        }
+
+        It 'Rejects a bare JSON string (non-object) with a clear message' {
+            { Invoke-ParseConfig '"just a string"' } | Should -Throw -ExpectedMessage 'InputJson must be a JSON object*'
+        }
     }
 
     Context 'Script requirements' {
