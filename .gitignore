@@ -1,0 +1,10 @@
+.gitignore
+**/.DS_Store
+
+# Real environment configs live in Config/; only *.example.json templates are tracked
+Config/*.json
+!Config/*.example.json
+
+# Local run artifacts
+Logs/
+Results/
