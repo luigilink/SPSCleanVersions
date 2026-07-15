@@ -3,6 +3,16 @@
 The format is based on and uses the types of changes according to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.2] - 2026-07-15
+
+### Changed
+
+- SPSCleanVersions.ps1
+  - The HTML report is now **local-only**. In Azure Automation it is no longer emitted
+    into the job output stream (dumping the full HTML made the runbook log unreadable);
+    only the run summary line is printed. Local execution is unchanged — the report is
+    still written to `Results/`
+
 ## [3.1.1] - 2026-07-15
 
 ### Fixed
