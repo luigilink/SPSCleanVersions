@@ -3,6 +3,30 @@
 The format is based on and uses the types of changes according to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1] - 2026-07-15
+
+### Fixed
+
+- SPSCleanVersions.ps1
+  - **Azure Automation runbook compatibility:** remove the parameter sets introduced
+    with `-ConfigFile` in 3.0.0. Azure Automation rejects runbooks that use parameter
+    sets (*"Parameter sets in runbooks are not supported in this release"*), which
+    prevented the script — whose primary target is Azure Automation — from starting as
+    a runbook. `-InputJson` and `-ConfigFile` are now plain optional parameters whose
+    mutual exclusivity is validated in the body (exactly one is required)
+  - **Azure Automation runbook compatibility:** explicitly `Import-Module PnP.PowerShell`.
+    In a runbook the `#Requires -Modules` directive does not import the module and command
+    auto-loading is unreliable in the sandbox, so `Connect-PnPOnline` was *"not recognized"*;
+    the explicit import fixes this (harmless locally)
+
+### Documentation
+
+- Wiki (Getting Started)
+  - Add a PowerShell / PnP.PowerShell version compatibility matrix. PnP.PowerShell 3.x
+    requires PowerShell 7.4, so in Azure Automation use a **PowerShell 7.4 Runtime
+    Environment** with PnP 3.x, or PnP.PowerShell 2.12.x on a classic 7.2 runbook. A
+    mismatch fails at startup with *"requires a minimum PowerShell version of '7.4.0'"*
+
 ## [3.1.0] - 2026-07-15
 
 ### Added

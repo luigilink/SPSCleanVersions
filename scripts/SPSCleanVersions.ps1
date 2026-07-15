@@ -1,5 +1,5 @@
 <#PSScriptInfo
-    .VERSION 3.1.0
+    .VERSION 3.1.1
 
     .GUID 7ecf4acd-17c4-4c50-be79-1fcf2b6611fe
 
@@ -97,7 +97,7 @@
     FileName:	SPSCleanVersions.ps1
     Author:		Jean-Cyril DROUHIN
     Date:		July 15, 2026
-    Version:	3.1.0
+    Version:	3.1.1
 
     .LINK
     https://spjc.fr/
@@ -107,25 +107,36 @@
 #Requires -PSEdition Core
 #Requires -Modules @{ ModuleName = 'PnP.PowerShell'; ModuleVersion = '2.12.0' }
 
-[CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'InlineJson')]
+# Azure Automation runbooks do not support parameter sets, so -InputJson and -ConfigFile
+# are declared as plain optional parameters and their mutual exclusivity is validated in
+# the body below (exactly one must be supplied).
+[CmdletBinding(SupportsShouldProcess)]
 param
 (
-    [Parameter(Mandatory = $true, ParameterSetName = 'InlineJson', HelpMessage = "JSON string containing all configuration (SiteUrls, KeepMajorVersions, KeepMinorVersions, ClientId, ForceDeleteOldVersions, DryRun)")]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(HelpMessage = "JSON string containing all configuration (SiteUrls, KeepMajorVersions, KeepMinorVersions, ClientId, ForceDeleteOldVersions, DryRun)")]
     [System.String]
     $InputJson,
 
-    [Parameter(Mandatory = $true, ParameterSetName = 'ConfigFile', HelpMessage = "Path to a local JSON configuration file (same schema as -InputJson)")]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(HelpMessage = "Path to a local JSON configuration file (same schema as -InputJson)")]
     [System.String]
     $ConfigFile
 )
 
 #region --- Load and parse JSON input ---
 # Configuration comes either from an inline JSON string (-InputJson, Azure Automation
-# Runbooks) or from a local JSON file (-ConfigFile, local execution). Both converge on
-# the same ConvertFrom-Json parsing and validation below.
-if ($PSCmdlet.ParameterSetName -eq 'ConfigFile') {
+# Runbooks) or from a local JSON file (-ConfigFile, local execution). Exactly one must be
+# supplied; both converge on the same ConvertFrom-Json parsing and validation below.
+$hasInputJson = -not [string]::IsNullOrWhiteSpace($InputJson)
+$hasConfigFile = -not [string]::IsNullOrWhiteSpace($ConfigFile)
+
+if (-not $hasInputJson -and -not $hasConfigFile) {
+    throw "Provide configuration via -InputJson (inline JSON string) or -ConfigFile (path to a JSON file)."
+}
+if ($hasInputJson -and $hasConfigFile) {
+    throw "-InputJson and -ConfigFile are mutually exclusive; supply only one."
+}
+
+if ($hasConfigFile) {
     if (-not (Test-Path -Path $ConfigFile -PathType Leaf)) {
         throw "Configuration file not found: $ConfigFile"
     }
@@ -255,6 +266,17 @@ if ($WhatIfPreference) {
 
 # Disable PnP PowerShell update check to avoid interactive prompts in non-interactive environments (Azure Automation).
 $env:PNPPOWERSHELL_UPDATECHECK = "false"
+
+# Explicitly import PnP.PowerShell. In Azure Automation runbooks the '#Requires -Modules'
+# directive does not import the module, and command auto-loading is unreliable in the
+# sandbox, so Connect-PnPOnline would otherwise be 'not recognized'. Harmless locally
+# (the module is simply loaded if not already).
+try {
+    Import-Module -Name PnP.PowerShell -ErrorAction Stop
+}
+catch {
+    throw "Unable to import the PnP.PowerShell module: $($_.Exception.Message). Ensure it is installed (locally) or imported into the Automation Account (Azure Automation)."
+}
 
 function Test-IsAzureAutomation {
     # In PS7.x, Azure Automation exposes several env vars (sandbox + managed identity endpoints).
@@ -415,7 +437,7 @@ function Clear-OldRunFiles {
 # Run context: local writes transcript + report files; Azure Automation emits the report
 # into the output stream (no persistent filesystem).
 $script:IsAzureAutomationRun = Test-IsAzureAutomation
-$script:ScriptVersion = '3.1.0'
+$script:ScriptVersion = '3.1.1'
 $script:RunTimestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $script:LogsFolder = $null
 $script:ResultsFolder = $null

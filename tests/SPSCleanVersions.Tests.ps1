@@ -61,16 +61,9 @@ Describe 'SPSCleanVersions Script' {
             $paramBlock | Should -Not -BeNullOrEmpty
         }
 
-        It 'Should have InputJson as a mandatory parameter' {
+        It 'Should define InputJson as an optional parameter' {
             $inputJsonParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'InputJson' }
             $inputJsonParam | Should -Not -BeNullOrEmpty
-
-            $mandatoryAttr = $inputJsonParam.Attributes | Where-Object {
-                $_ -is [System.Management.Automation.Language.AttributeAst] -and
-                $_.TypeName.Name -eq 'Parameter'
-            }
-            $mandatoryArg = $mandatoryAttr.NamedArguments | Where-Object { $_.ArgumentName -eq 'Mandatory' }
-            $mandatoryArg | Should -Not -BeNullOrEmpty
         }
 
         It 'Should have InputJson typed as System.String' {
@@ -81,25 +74,9 @@ Describe 'SPSCleanVersions Script' {
             $typeAttr.TypeName.FullName | Should -Be 'System.String'
         }
 
-        It 'Should have InputJson with ValidateNotNullOrEmpty' {
-            $inputJsonParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'InputJson' }
-            $validateAttr = $inputJsonParam.Attributes | Where-Object {
-                $_ -is [System.Management.Automation.Language.AttributeAst] -and
-                $_.TypeName.Name -eq 'ValidateNotNullOrEmpty'
-            }
-            $validateAttr | Should -Not -BeNullOrEmpty
-        }
-
-        It 'Should have ConfigFile as a mandatory parameter' {
+        It 'Should define ConfigFile as an optional parameter' {
             $configFileParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'ConfigFile' }
             $configFileParam | Should -Not -BeNullOrEmpty
-
-            $mandatoryAttr = $configFileParam.Attributes | Where-Object {
-                $_ -is [System.Management.Automation.Language.AttributeAst] -and
-                $_.TypeName.Name -eq 'Parameter'
-            }
-            $mandatoryArg = $mandatoryAttr.NamedArguments | Where-Object { $_.ArgumentName -eq 'Mandatory' }
-            $mandatoryArg | Should -Not -BeNullOrEmpty
         }
 
         It 'Should have ConfigFile typed as System.String' {
@@ -110,24 +87,14 @@ Describe 'SPSCleanVersions Script' {
             $typeAttr.TypeName.FullName | Should -Be 'System.String'
         }
 
-        It 'Should place InputJson and ConfigFile in separate parameter sets' {
-            $inputJsonParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'InputJson' }
-            $configFileParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'ConfigFile' }
-
-            $inputJsonSet = ($inputJsonParam.Attributes | Where-Object {
-                    $_ -is [System.Management.Automation.Language.AttributeAst] -and $_.TypeName.Name -eq 'Parameter'
-                }).NamedArguments | Where-Object { $_.ArgumentName -eq 'ParameterSetName' }
-            $configFileSet = ($configFileParam.Attributes | Where-Object {
-                    $_ -is [System.Management.Automation.Language.AttributeAst] -and $_.TypeName.Name -eq 'Parameter'
-                }).NamedArguments | Where-Object { $_.ArgumentName -eq 'ParameterSetName' }
-
-            $inputJsonSet | Should -Not -BeNullOrEmpty
-            $configFileSet | Should -Not -BeNullOrEmpty
-            $inputJsonSet.Argument.Value | Should -Not -Be $configFileSet.Argument.Value
+        It 'Should NOT use parameter sets (unsupported in Azure Automation runbooks)' {
+            $scriptContent | Should -Not -Match 'ParameterSetName'
+            $scriptContent | Should -Not -Match 'DefaultParameterSetName'
         }
 
-        It 'Should declare a DefaultParameterSetName on CmdletBinding' {
-            $scriptContent | Should -Match 'DefaultParameterSetName'
+        It 'Should validate that exactly one config source is supplied' {
+            $scriptContent | Should -Match 'mutually exclusive; supply only one'
+            $scriptContent | Should -Match 'Provide configuration via -InputJson'
         }
 
         It 'Should have exactly two parameters in the param block' {
@@ -173,8 +140,8 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'Configuration file not found'
         }
 
-        It 'Should branch on the ConfigFile parameter set' {
-            $scriptContent | Should -Match "ParameterSetName\s+-eq\s+'ConfigFile'"
+        It 'Should select the config file source when ConfigFile is supplied' {
+            $scriptContent | Should -Match '\$hasConfigFile'
         }
 
         It 'Should trim the raw input before parsing' {
@@ -290,6 +257,10 @@ Describe 'SPSCleanVersions Script' {
 
         It 'Should disable PnP PowerShell update check' {
             $scriptContent | Should -Match 'PNPPOWERSHELL_UPDATECHECK'
+        }
+
+        It 'Should explicitly import the PnP.PowerShell module (runbook autoloading is unreliable)' {
+            $scriptContent | Should -Match 'Import-Module\s+-Name\s+PnP\.PowerShell'
         }
     }
 
