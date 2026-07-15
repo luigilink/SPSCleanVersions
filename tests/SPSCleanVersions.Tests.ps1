@@ -447,6 +447,103 @@ Describe 'SPSCleanVersions Script' {
         }
     }
 
+    Context 'Site version policy drift detection' {
+
+        It 'Should define the Test-SiteVersionPolicyDrift helper function' {
+            $scriptContent | Should -Match 'function\s+Test-SiteVersionPolicyDrift'
+        }
+
+        It 'Should read the current policy with Get-PnPSiteVersionPolicy' {
+            $scriptContent | Should -Match 'Get-PnPSiteVersionPolicy'
+        }
+
+        It 'Should compare against the DefaultTrimMode field' {
+            $scriptContent | Should -Match 'DefaultTrimMode'
+        }
+
+        It 'Should only apply the site policy when a drift is detected' {
+            $scriptContent | Should -Match '\$hasDrift'
+            $scriptContent | Should -Match 'No drift'
+        }
+
+        It 'Should not pass MajorWithMinorVersions for a new-libraries-only request' {
+            $scriptContent | Should -Match '\$applyExisting\s+-and\s+\$MajorWithMinorVersions'
+        }
+
+        Context 'Drift comparison (functional, real field shapes)' {
+
+            BeforeAll {
+                # Reproduce the drift comparison in isolation using the exact field shapes
+                # returned by Get-PnPSiteVersionPolicy (captured from a live tenant).
+                $script:mockPolicy = $null
+                function Get-PnPSiteVersionPolicy { param() ; return $script:mockPolicy }
+
+                function Test-Drift {
+                    param(
+                        [string] $Mode, [int] $MajorVersions, [int] $ExpireAfterDays
+                    )
+                    try { $current = Get-PnPSiteVersionPolicy -ErrorAction Stop } catch { return $true }
+                    if ($null -eq $current) { return ($Mode -ne 'InheritFromTenant') }
+                    $curTrimMode = $current.PSObject.Properties['DefaultTrimMode'].Value
+                    $curExpire = $current.PSObject.Properties['DefaultExpireAfterDays'].Value
+                    $curMajor = $current.PSObject.Properties['MajorVersionLimit'].Value
+                    $hasSitePolicy = -not [string]::IsNullOrWhiteSpace([string]$curTrimMode)
+                    switch ($Mode) {
+                        'InheritFromTenant' { return $hasSitePolicy }
+                        'AutoExpiration' { if (-not $hasSitePolicy) { return $true }; return ("$curTrimMode" -ine 'AutoExpiration') }
+                        default {
+                            if (-not $hasSitePolicy) { return $true }
+                            if ("$curTrimMode" -ine $Mode) { return $true }
+                            if ([string]::IsNullOrWhiteSpace([string]$curMajor) -or [int]$curMajor -ne $MajorVersions) { return $true }
+                            $desiredExpire = if ($Mode -eq 'NoExpiration') { 0 } else { $ExpireAfterDays }
+                            $curExpireInt = if ([string]::IsNullOrWhiteSpace([string]$curExpire)) { 0 } else { [int]$curExpire }
+                            if ($curExpireInt -ne $desiredExpire) { return $true }
+                            return $false
+                        }
+                    }
+                }
+
+                $script:noPolicy = [PSCustomObject]@{ Url = 'x'; DefaultTrimMode = ''; DefaultExpireAfterDays = ''; MajorVersionLimit = ''; Description = 'No Site Level Policy Set for new document libraries' }
+                $script:expireAfter = [PSCustomObject]@{ Url = 'x'; DefaultTrimMode = 'ExpireAfter'; DefaultExpireAfterDays = '180'; MajorVersionLimit = '100'; Description = 'Site has Manual settings...' }
+            }
+
+            It 'No site policy + InheritFromTenant = no drift' {
+                $script:mockPolicy = $script:noPolicy
+                Test-Drift -Mode 'InheritFromTenant' | Should -BeFalse
+            }
+
+            It 'No site policy + ExpireAfter = drift' {
+                $script:mockPolicy = $script:noPolicy
+                Test-Drift -Mode 'ExpireAfter' -MajorVersions 100 -ExpireAfterDays 180 | Should -BeTrue
+            }
+
+            It 'Matching ExpireAfter 180/100 = no drift' {
+                $script:mockPolicy = $script:expireAfter
+                Test-Drift -Mode 'ExpireAfter' -MajorVersions 100 -ExpireAfterDays 180 | Should -BeFalse
+            }
+
+            It 'ExpireAfter with different days = drift' {
+                $script:mockPolicy = $script:expireAfter
+                Test-Drift -Mode 'ExpireAfter' -MajorVersions 100 -ExpireAfterDays 90 | Should -BeTrue
+            }
+
+            It 'ExpireAfter with different major count = drift' {
+                $script:mockPolicy = $script:expireAfter
+                Test-Drift -Mode 'ExpireAfter' -MajorVersions 50 -ExpireAfterDays 180 | Should -BeTrue
+            }
+
+            It 'Explicit policy present + InheritFromTenant = drift' {
+                $script:mockPolicy = $script:expireAfter
+                Test-Drift -Mode 'InheritFromTenant' | Should -BeTrue
+            }
+
+            It 'Unreadable policy = drift (fail-safe)' {
+                function Get-PnPSiteVersionPolicy { throw 'unauthorized' }
+                Test-Drift -Mode 'ExpireAfter' -MajorVersions 100 -ExpireAfterDays 180 | Should -BeTrue
+            }
+        }
+    }
+
     Context 'Error handling' {
 
         It 'Should use try/catch/finally pattern' {
