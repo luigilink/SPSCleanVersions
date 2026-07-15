@@ -565,8 +565,9 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'Stop-Transcript'
         }
 
-        It 'Should emit the HTML report to the output stream in Azure Automation' {
-            $scriptContent | Should -Match 'BEGIN SPSCleanVersions HTML report'
+        It 'Should keep the HTML report local-only (not dumped in Azure Automation)' {
+            $scriptContent | Should -Not -Match 'BEGIN SPSCleanVersions HTML report'
+            $scriptContent | Should -Match '-not \$script:IsAzureAutomationRun'
         }
 
         It 'Should default EnableReport to true' {
