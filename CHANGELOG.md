@@ -3,6 +3,18 @@
 The format is based on and uses the types of changes according to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1] - 2026-07-15
+
+### Fixed
+
+- SPSCleanVersions.ps1
+  - **Azure Automation runbook compatibility:** remove the parameter sets introduced
+    with `-ConfigFile` in 3.0.0. Azure Automation rejects runbooks that use parameter
+    sets (*"Parameter sets in runbooks are not supported in this release"*), which
+    prevented the script — whose primary target is Azure Automation — from starting as
+    a runbook. `-InputJson` and `-ConfigFile` are now plain optional parameters whose
+    mutual exclusivity is validated in the body (exactly one is required)
+
 ## [3.1.0] - 2026-07-15
 
 ### Added
