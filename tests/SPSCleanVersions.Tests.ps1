@@ -470,6 +470,10 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match '\$applyExisting\s+-and\s+\$MajorWithMinorVersions'
         }
 
+        It 'Should warn about the app-only limitation in Azure Automation' {
+            $scriptContent | Should -Match 'require a delegated user context'
+        }
+
         Context 'Drift comparison (functional, real field shapes)' {
 
             BeforeAll {

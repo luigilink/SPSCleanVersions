@@ -432,6 +432,17 @@ foreach ($SiteUrl in $SiteUrls) {
         }
         else {
             # --- Site version policy mode: Set-PnPSiteVersionPolicy at the site level ---
+            # Get-/Set-PnPSiteVersionPolicy require a delegated user context that is site
+            # collection administrator. In Azure Automation (Managed Identity / app-only)
+            # there is no user context, so these calls may fail with an unauthorized error.
+            # Warn once so the failure mode is clear.
+            if (Test-IsAzureAutomation) {
+                Write-Warning @"
+Site version policy (Get-/Set-PnPSiteVersionPolicy) requires a delegated user context
+that is site collection administrator. Running in Azure Automation (Managed Identity /
+app-only) may not be supported and can fail with an unauthorized error for site: $SiteUrl
+"@
+            }
             Write-Output "Checking site version policy on $SiteUrl (Mode=$VersionPolicyMode)..."
             try {
                 $hasDrift = Test-SiteVersionPolicyDrift -Mode $VersionPolicyMode `
