@@ -21,7 +21,10 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
   "DryRun": <boolean>,
   "VersionPolicyMode": "<string>",
   "ExpireVersionsAfterDays": <integer>,
-  "ApplyTo": "<string>"
+  "ApplyTo": "<string>",
+  "SiteScope": "<string>",
+  "TenantAdminUrl": "<string>",
+  "SiteFilter": "<string>"
 }
 ```
 
@@ -29,7 +32,7 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 
 | Property | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `SiteUrls` | string[] | **Yes** | — | One or more SharePoint Site Collection URLs to process. |
+| `SiteUrls` | string[] | Conditional | — | One or more SharePoint Site Collection URLs to process. **Required** when `SiteScope` is `Selected` (default); optional when `SiteScope` is `All`. |
 | `KeepMajorVersions` | integer | No | `50` | Maximum number of major versions to retain. Maps to `-MajorVersions` in the site version policy modes. |
 | `KeepMinorVersions` | integer | No | `0` | Maximum number of minor versions to retain. Set to `0` to disable minor versioning. Maps to `-MajorWithMinorVersions` in the site version policy modes. |
 | `ClientId` | string | No | — | Azure AD App Registration Client ID used for authentication. Required for Interactive login (local) and optional for Managed Identity (Azure Automation). |
@@ -38,6 +41,9 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 | `VersionPolicyMode` | string | No | `Legacy` | Version policy mechanism. `Legacy` keeps the per-library count-based `Set-PnPList` behaviour. `AutoExpiration`, `ExpireAfter`, `NoExpiration` and `InheritFromTenant` apply a site-level policy via `Set-PnPSiteVersionPolicy`. See [Version policy modes](#version-policy-modes). |
 | `ExpireVersionsAfterDays` | integer | No | `0` | Number of days after which versions expire. Used by `ExpireAfter` (must be **>= 30**). `NoExpiration` forces `0`. |
 | `ApplyTo` | string | No | `Both` | `New`, `Existing` or `Both` document libraries. Maps to `-ApplyToNewDocumentLibraries` / `-ApplyToExistingDocumentLibraries`. Site version policy modes only. |
+| `SiteScope` | string | No | `Selected` | `Selected` processes `SiteUrls`. `All` enumerates **every** site collection in the tenant via `Get-PnPTenantSite`. Site version policy modes only (not `Legacy`). See [Tenant-wide scope](#tenant-wide-scope-sitescope-all). |
+| `TenantAdminUrl` | string | Conditional | — | SharePoint admin center URL (e.g. `https://contoso-admin.sharepoint.com`). **Required** when `SiteScope` is `All`. |
+| `SiteFilter` | string | No | — | Optional server-side `-Filter` passed to `Get-PnPTenantSite` to narrow the enumeration when `SiteScope` is `All` (e.g. `"Url -like 'sales'"`). |
 
 ## Version policy modes
 
@@ -56,6 +62,25 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 > **Drift-based apply:** in the site version policy modes, the script first reads the current policy with `Get-PnPSiteVersionPolicy` and only calls `Set-PnPSiteVersionPolicy` when it differs from the desired settings (a *drift*). Sites that already match are logged as compliant and skipped. If the current policy cannot be read, the script fails safe and applies the policy anyway.
 
 > **⚠️ Azure Automation / app-only limitation:** `Get-PnPSiteVersionPolicy` and `Set-PnPSiteVersionPolicy` require a **delegated user context** that is **site collection administrator**. When running as an Azure Automation Runbook with a **Managed Identity** (app-only), there is no user context, so the site version policy modes may fail with an *"Attempted to perform an unauthorized operation"* error. The script emits a warning in that case. For tenant-wide version policy automation from a runbook, prefer the **tenant-level** settings (`Set-PnPTenant`) or run the site version policy modes **interactively / locally** with a SharePoint Administrator account. The default `Legacy` mode is unaffected.
+
+## Tenant-wide scope (SiteScope: All)
+
+By default (`SiteScope: Selected`) the script only processes the sites listed in `SiteUrls`. Set `SiteScope: All` to apply a site version policy across **every site collection in the tenant**. The script connects to `TenantAdminUrl`, enumerates sites with `Get-PnPTenantSite` (OneDrive personal sites excluded), optionally narrowed by `SiteFilter`, and applies the policy to each — still gated by the per-site drift check, so unchanged sites are skipped.
+
+> **⚠️ Tenant-wide impact:** `SiteScope: All` can touch **thousands** of site collections and, when `ApplyTo` includes `Existing`, submit a background version-trim job on each. **Always run with `"DryRun": true` first** to review the scope, and consider narrowing with `SiteFilter`. This scope is only supported with the site version policy modes (not `Legacy`), and requires **SharePoint Administrator** privileges plus a delegated (interactive/local) context.
+
+```json
+{
+  "SiteScope": "All",
+  "TenantAdminUrl": "https://contoso-admin.sharepoint.com",
+  "SiteFilter": "Url -like 'sales'",
+  "VersionPolicyMode": "ExpireAfter",
+  "ExpireVersionsAfterDays": 180,
+  "KeepMajorVersions": 100,
+  "ApplyTo": "Both",
+  "DryRun": true
+}
+```
 
 ## Examples
 

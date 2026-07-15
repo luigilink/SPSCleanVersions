@@ -372,7 +372,6 @@ Describe 'SPSCleanVersions Script' {
         It 'Should define the Set-SiteVersionPolicy helper function' {
             $scriptContent | Should -Match 'function\s+Set-SiteVersionPolicy'
         }
-
         It 'Should call Set-PnPSiteVersionPolicy' {
             $scriptContent | Should -Match 'Set-PnPSiteVersionPolicy'
         }
@@ -472,6 +471,34 @@ Describe 'SPSCleanVersions Script' {
 
         It 'Should warn about the app-only limitation in Azure Automation' {
             $scriptContent | Should -Match 'require a delegated user context'
+        }
+
+        It 'Should define the Get-TenantSiteUrls helper function' {
+            $scriptContent | Should -Match 'function\s+Get-TenantSiteUrls'
+        }
+
+        It 'Should enumerate tenant sites with Get-PnPTenantSite when SiteScope is All' {
+            $scriptContent | Should -Match 'Get-PnPTenantSite'
+        }
+
+        It 'Should default SiteScope to Selected' {
+            $scriptContent | Should -Match "SiteScope.*'Selected'"
+        }
+
+        It 'Should require TenantAdminUrl when SiteScope is All' {
+            $scriptContent | Should -Match "'TenantAdminUrl' is required when 'SiteScope' is 'All'"
+        }
+
+        It 'Should reject SiteScope All with Legacy mode' {
+            $scriptContent | Should -Match "'SiteScope' = 'All' is only supported"
+        }
+
+        It 'Should make SiteUrls optional when SiteScope is All' {
+            $scriptContent | Should -Match "or set 'SiteScope' to 'All'"
+        }
+
+        It 'Should support a server-side SiteFilter for enumeration' {
+            $scriptContent | Should -Match 'SiteFilter'
         }
 
         Context 'Drift comparison (functional, real field shapes)' {

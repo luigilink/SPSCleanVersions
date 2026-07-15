@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Only pass `MajorWithMinorVersions` when the request targets existing document
     libraries, per the `Set-PnPSiteVersionPolicy` constraint (it is rejected for a
     new-libraries-only request when auto expiration is off)
+  - Add `SiteScope` (`Selected` default, or `All`), `TenantAdminUrl` and `SiteFilter`
+    properties: `SiteScope: All` enumerates every site collection via
+    `Get-PnPTenantSite` (OneDrive excluded, optional server-side filter) and applies
+    the version policy across the tenant, still gated by the per-site drift check.
+    `SiteUrls` is optional for `All` (requires `TenantAdminUrl`); `All` is not supported
+    with the `Legacy` mode
+  - Add a warning about the app-only (Azure Automation / Managed Identity) limitation
+    of `Get-`/`Set-PnPSiteVersionPolicy`, which require a delegated site-collection-admin
+    context
 - SPSCleanVersions.Tests.ps1
   - Add tests for the site version policy modes, `ApplyTo` mapping, and functional
     contexts validating the `ExpireVersionsAfterDays` rules and the drift comparison

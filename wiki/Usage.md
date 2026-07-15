@@ -81,6 +81,16 @@ Set `"VersionPolicyMode"` to a site-level mode to apply a policy via `Set-PnPSit
 
 > **Note:** `ExpireVersionsAfterDays` must be `0` (no expiration) or `>= 30`. See [Configuration](./Configuration#version-policy-modes) for all modes.
 
+### Example 6: Apply a policy tenant-wide (SiteScope: All)
+
+Set `"SiteScope": "All"` with a `TenantAdminUrl` to enumerate every site collection via `Get-PnPTenantSite` and apply the policy across the tenant (only where a drift is detected). Always dry-run first.
+
+```powershell
+.\SPSCleanVersions.ps1 -InputJson '{"SiteScope":"All","TenantAdminUrl":"https://contoso-admin.sharepoint.com","VersionPolicyMode":"ExpireAfter","ExpireVersionsAfterDays":180,"KeepMajorVersions":100,"DryRun":true}'
+```
+
+> **⚠️ Warning:** `SiteScope: All` can touch thousands of sites. Run with `"DryRun": true` first and consider narrowing with `SiteFilter`. See [Tenant-wide scope](./Configuration#tenant-wide-scope-sitescope-all).
+
 ## Error Handling
 
 Ensure the provided credentials have access to the SharePoint Sites.
