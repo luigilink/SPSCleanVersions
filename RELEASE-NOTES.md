@@ -21,6 +21,11 @@
     policy is treated as a drift and applied
   - Only pass `MajorWithMinorVersions` when the request targets existing document
     libraries, per the `Set-PnPSiteVersionPolicy` constraint
+  - Add `SiteScope` (`Selected` default, or `All`), `TenantAdminUrl` and `SiteFilter`:
+    `SiteScope: All` enumerates every site collection via `Get-PnPTenantSite` and applies
+    the version policy across the tenant, still gated by the per-site drift check
+  - Add a warning about the app-only (Azure Automation / Managed Identity) limitation of
+    `Get-`/`Set-PnPSiteVersionPolicy`
 - Wiki Documentation
   - Document `VersionPolicyMode`, `ExpireVersionsAfterDays`, `ApplyTo` and the
     drift-based apply behaviour
