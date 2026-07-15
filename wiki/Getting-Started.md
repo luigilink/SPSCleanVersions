@@ -10,6 +10,15 @@ Requires PowerShell 7.2 or later with PSEdition Core. [Installation guide](https
 
 This tool relies on the PnP.PowerShell module version 2.12.0 or later. [Installation guide](https://pnp.github.io/powershell/articles/installation.html).
 
+> **⚠️ PowerShell / PnP.PowerShell version matrix.** PnP.PowerShell **3.x requires PowerShell 7.4+**, while the 2.x line supports PowerShell 7.2. Make sure the two match, especially in **Azure Automation**:
+>
+> | Runbook / host runtime | Compatible PnP.PowerShell | Notes |
+> |---|---|---|
+> | PowerShell **7.4** (Runtime Environment) | **3.x** (e.g. 3.3.0) | Recommended. All modes work (Legacy + site version policy + tenant scope). |
+> | PowerShell **7.2** (classic runbook) | **2.12.x** | Legacy mode works; the newer site version policy cmdlets may be unavailable. |
+>
+> A mismatch (e.g. PnP 3.x on a 7.2 runbook) fails at startup with *"The module requires a minimum PowerShell version of '7.4.0'"*. In Azure Automation, create a **PowerShell 7.4 Runtime Environment** and import PnP.PowerShell 3.x into it.
+
 ### Permissions
 
 * **Role:** SharePoint Administrator or Global Administrator.

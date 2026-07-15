@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     auto-loading is unreliable in the sandbox, so `Connect-PnPOnline` was *"not recognized"*;
     the explicit import fixes this (harmless locally)
 
+### Documentation
+
+- Wiki (Getting Started)
+  - Add a PowerShell / PnP.PowerShell version compatibility matrix. PnP.PowerShell 3.x
+    requires PowerShell 7.4, so in Azure Automation use a **PowerShell 7.4 Runtime
+    Environment** with PnP 3.x, or PnP.PowerShell 2.12.x on a classic 7.2 runbook. A
+    mismatch fails at startup with *"requires a minimum PowerShell version of '7.4.0'"*
+
 ## [3.1.0] - 2026-07-15
 
 ### Added
