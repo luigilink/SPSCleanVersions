@@ -323,53 +323,76 @@ function Export-SPSCleanVersionsReport {
     $dryTag = if ($DryRunMode) { '<span class="kpi kpi-dry">DryRun</span>' } else { '' }
 
     $css = @'
-:root{--brand:#1f6fb2;--ink:#222;--muted:#666;--line:#e3e3e3;--zebra:#f7f9fb;--ok-bg:#2e9b57;--alert-bg:#c0392b;--dry-bg:#c19c00}
+:root{--ink:#1b1b1b;--muted:#6b7280;--bg:#f4f6f8;--card:#ffffff;--line:#e5e7eb;--brand:#2b5797;--brand-dark:#1e3f6f;--ok-bg:#bfff80;--ok-ink:#13300a;--alert-bg:#ff6464;--alert-ink:#3a0000;--dry-bg:#ffd54a;--dry-ink:#3a2e00;--zebra:#f7f9fb}
 *{box-sizing:border-box}
-body{font-family:'Aptos','Segoe UI',-apple-system,BlinkMacSystemFont,sans-serif;color:var(--ink);margin:0;padding:24px;background:#fff}
-h1{color:var(--brand);font-size:22px;margin:0 0 4px}
-.meta{color:var(--muted);font-size:12px;margin-bottom:16px}
-.cards{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px}
-.card{background:#fff;border:1px solid var(--line);border-radius:6px;padding:12px 16px;min-width:120px}
-.card-value{font-size:24px;font-weight:700;color:var(--brand)}
-.card-label{font-size:12px;color:var(--muted)}
-.kpi{display:inline-block;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:700;color:#fff;margin-left:6px}
-.kpi-ok{background:var(--ok-bg)}.kpi-alert{background:var(--alert-bg)}.kpi-dry{background:var(--dry-bg);color:#222}
-table{border-collapse:collapse;width:100%;font-size:12px}
-th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
-th{background:var(--brand);color:#fff;position:sticky;top:0}
+body{margin:0;padding:0;background:var(--bg);color:var(--ink);font:14px/1.45 'Segoe UI','Aptos',Arial,sans-serif}
+header.banner{position:sticky;top:0;z-index:10;padding:12px 20px;color:#fff;background:var(--brand);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+header.banner h1{margin:0;font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px}
+.kpi{display:inline-block;padding:4px 12px;border-radius:6px;font-weight:700;font-size:12px;margin-left:6px}
+.kpi-ok{background:var(--ok-bg);color:var(--ok-ink)}
+.kpi-alert{background:var(--alert-bg);color:var(--alert-ink)}
+.kpi-dry{background:var(--dry-bg);color:var(--dry-ink)}
+.banner .meta{color:#e5e7eb;font-size:12px}
+.layout{max-width:1100px;margin:16px auto;padding:0 16px}
+.cards{display:flex;flex-wrap:wrap;gap:12px;margin:0 0 16px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 18px;min-width:140px;flex:1}
+.card.accent{border-color:#f2b8b8;background:#fff5f5}
+.card-value{font-size:26px;font-weight:700;color:var(--brand)}
+.card.accent .card-value{color:#c0392b}
+.card-label{font-size:12px;color:var(--muted);margin-top:2px}
+section{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px}
+section h2{margin:0 0 10px 0;font-size:14px;color:var(--brand)}
+.search{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;font-size:13px;margin:0 0 12px 0}
+.table-wrap{overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:6px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{position:sticky;top:0;background:#eef2f7;color:#10222e;font-weight:600;z-index:1}
 tbody tr:nth-child(even){background:var(--zebra)}
-.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;color:#fff}
-.badge.Applied{background:#1f6fb2}.badge.Skipped{background:#9aa4ad}.badge.Compliant{background:#9aa4ad}.badge.Failed{background:#c0392b}
-.search{padding:6px 10px;border:1px solid var(--line);border-radius:4px;font-size:13px;width:320px;max-width:100%;margin-bottom:12px}
-.footer{color:var(--muted);font-size:11px;margin-top:24px;border-top:1px solid var(--line);padding-top:8px}
+tr.row-alert td{background:#fff5f5}
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:600;color:#fff}
+.badge.Applied{background:var(--brand)}
+.badge.Skipped,.badge.Compliant{background:#9aa4ad}
+.badge.Failed{background:#c0392b}
+footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
 '@
 
     $sb = New-Object System.Text.StringBuilder
     foreach ($r in $rows) {
         $oc = ConvertTo-SPSHtmlEncoded ([string]$r.Outcome)
-        [void]$sb.Append('<tr><td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Site)) + '</td>')
+        $rowClass = if ($r.Outcome -eq 'Failed') { ' class="row-alert"' } else { '' }
+        [void]$sb.Append("<tr$rowClass><td>" + (ConvertTo-SPSHtmlEncoded ([string]$r.Site)) + '</td>')
         [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Scope)) + '</td>')
         [void]$sb.Append('<td><span class="badge ' + $oc + '">' + $oc + '</span></td>')
         [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Detail)) + '</td></tr>')
     }
 
+    $failedCardClass = if ($failed -gt 0) { 'card accent' } else { 'card' }
     $encTitle = ConvertTo-SPSHtmlEncoded $Title
     $encVer = ConvertTo-SPSHtmlEncoded $Version
     $page = @"
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>$encTitle</title><style>$css</style></head><body>
-<h1>$encTitle <span class="kpi $overallClass">$overall</span> $dryTag</h1>
-<div class="meta">Generated: $generated &middot; SPSCleanVersions $encVer</div>
-<div class="cards">
-<div class="card"><div class="card-value">$total</div><div class="card-label">Sites processed</div></div>
-<div class="card"><div class="card-value">$applied</div><div class="card-label">Applied</div></div>
-<div class="card"><div class="card-value">$skipped</div><div class="card-label">Skipped / compliant</div></div>
-<div class="card"><div class="card-value">$failed</div><div class="card-label">Failed</div></div>
-</div>
-<input id="spsSearch" class="search" placeholder="Filter rows...">
-<table><thead><tr><th>Site</th><th>Scope</th><th>Outcome</th><th>Detail</th></tr></thead><tbody id="spsBody">
+<header class="banner">
+  <h1>$encTitle <span class="kpi $overallClass">$overall</span> $dryTag</h1>
+  <span class="meta">generated $generated &middot; v$encVer</span>
+</header>
+<div class="layout">
+  <div class="cards">
+    <div class="card"><div class="card-value">$total</div><div class="card-label">Sites processed</div></div>
+    <div class="card"><div class="card-value">$applied</div><div class="card-label">Applied</div></div>
+    <div class="card"><div class="card-value">$skipped</div><div class="card-label">Skipped / compliant</div></div>
+    <div class="$failedCardClass"><div class="card-value">$failed</div><div class="card-label">Failed</div></div>
+  </div>
+  <section>
+    <h2>Per-site results</h2>
+    <input id="spsSearch" class="search" type="search" placeholder="Filter rows...">
+    <div class="table-wrap">
+      <table><thead><tr><th>Site</th><th>Scope</th><th>Outcome</th><th>Detail</th></tr></thead><tbody id="spsBody">
 $($sb.ToString())
-</tbody></table>
-<div class="footer">Generated by SPSCleanVersions $encVer.</div>
+      </tbody></table>
+    </div>
+  </section>
+  <footer>Generated by SPSCleanVersions v$encVer &middot; $generated</footer>
+</div>
 <script>
 (function(){var q=document.getElementById('spsSearch');q.addEventListener('input',function(){var t=q.value.toLowerCase();document.querySelectorAll('#spsBody tr').forEach(function(tr){tr.style.display=(t===''||tr.textContent.toLowerCase().indexOf(t)>-1)?'':'none';});});})();
 </script>

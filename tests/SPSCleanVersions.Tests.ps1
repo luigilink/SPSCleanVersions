@@ -627,6 +627,17 @@ Describe 'SPSCleanVersions Script' {
                 $html | Should -Match 'Sites processed'
             }
 
+            It 'Uses the house-style sticky brand banner and centered layout' {
+                $html = Export-SPSCleanVersionsReport -Results $script:sample -Version '3.1.0'
+                $html | Should -Match '<header class="banner">'
+                $html | Should -Match '<div class="layout">'
+            }
+
+            It 'Highlights failed rows with the alert row class' {
+                $html = Export-SPSCleanVersionsReport -Results $script:sample -Version '3.1.0'
+                $html | Should -Match 'class="row-alert"'
+            }
+
             It 'HTML-encodes dangerous values (no injection)' {
                 $html = Export-SPSCleanVersionsReport -Results $script:sample -Version '3.1.0'
                 $html | Should -Match '&lt;C&amp;D&gt;'
