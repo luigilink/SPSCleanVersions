@@ -15,11 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Add `DefaultParameterSetName = 'InlineJson'` to `CmdletBinding` and split
     `-InputJson` / `-ConfigFile` into mutually exclusive parameter sets
   - Add missing-file and empty-file guards for `-ConfigFile`
+  - Harden JSON parsing: trim the input, strip an accidental wrapping pair of
+    single quotes (`'...'`) copied from a PowerShell command line, and reject
+    non-object JSON (string/scalar) with a clear, actionable message instead of
+    the misleading `SiteUrls is required` error (fixes #9)
 - Config/SPSCleanVersions.example.json
   - Add example JSON configuration template for the `-ConfigFile` parameter
 - SPSCleanVersions.Tests.ps1
   - Add tests for the two mutually exclusive parameter sets and the config-file
     loading branch (Get-Content, missing-file guard, parameter-set switch)
+  - Add tests for the hardened JSON parsing (trim, single-quote stripping,
+    non-object rejection) including a functional context reproducing the
+    wrapped-quotes and curly-quotes cases
 - Wiki Documentation
   - Document the `-ConfigFile` parameter and the file-based configuration workflow
 

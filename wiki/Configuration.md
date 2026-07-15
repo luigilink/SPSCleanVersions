@@ -170,3 +170,18 @@ When running as an Azure Automation Runbook, paste the JSON string directly into
 
 > **Tip:** The script automatically detects the Azure Automation environment and connects via Managed Identity. No interactive login is needed.
 > **Note:** `ForceDeleteOldVersions` is automatically skipped in Azure Automation because the `New-PnPSiteFileVersionBatchDeleteJob` API requires delegated user context, which is not available with Managed Identity.
+
+## Troubleshooting
+
+### Error: `JSON property 'SiteUrls' is required` even though SiteUrls is present
+
+When pasting the value into the Azure Automation **InputJson** field, paste the **raw JSON object only** — do **not** wrap it in the surrounding single quotes used on a PowerShell command line.
+
+- ❌ Wrong (portal field): `'{"SiteUrls":["https://contoso.sharepoint.com/teams/CSSC"],"KeepMajorVersions":100}'`
+- ✅ Correct (portal field): `{"SiteUrls":["https://contoso.sharepoint.com/teams/CSSC"],"KeepMajorVersions":100}`
+
+Since v3.0.0 the script auto-strips a single wrapping pair of single quotes and validates that the parsed value is a JSON object, so this mistake now yields a clear message instead of the misleading `SiteUrls is required`.
+
+### Error: `Invalid JSON input ... Invalid property identifier character`
+
+The value contains **curly / smart quotes** (`“ ”`) instead of straight double quotes (`"`), typically after copying from Teams, Outlook, or Word. Retype the double quotes as straight quotes, or paste from a plain-text editor.
