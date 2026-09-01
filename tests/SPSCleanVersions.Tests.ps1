@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     $scriptPath = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
     $scriptContent = Get-Content -Path $scriptPath -Raw
 }
