@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-    .VERSION 3.1.5
+    .VERSION 3.2.0
 
     .GUID 7ecf4acd-17c4-4c50-be79-1fcf2b6611fe
 
@@ -97,7 +97,7 @@
     FileName:	SPSCleanVersions.ps1
     Author:		Jean-Cyril DROUHIN
     Date:		September 16, 2026
-    Version:	3.1.5
+    Version:	3.2.0
 
     .LINK
     https://spjc.fr/
@@ -441,7 +441,7 @@ function Clear-OldRunFiles {
 # Run context: local writes transcript + report files; Azure Automation emits the report
 # into the output stream (no persistent filesystem).
 $script:IsAzureAutomationRun = Test-IsAzureAutomation
-$script:ScriptVersion = '3.1.5'
+$script:ScriptVersion = '3.2.0'
 $script:RunTimestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $script:LogsFolder = $null
 $script:ResultsFolder = $null
@@ -607,6 +607,34 @@ function Set-SiteVersionPolicy {
     }
 }
 
+function Resolve-EffectiveApplyTo {
+    <#
+        .SYNOPSIS
+        Resolves the ApplyTo target actually usable in the current authentication context.
+
+        .DESCRIPTION
+        Applying a site version policy to EXISTING document libraries is not supported with
+        app-only authentication (Azure Automation / Managed Identity): SharePoint answers
+        "Cannot call this API with an app-only principal." In that context this function
+        downgrades the target so the run does the app-only-capable work instead of failing:
+          - 'Both'     -> 'New'  (keep the site default that governs new libraries)
+          - 'Existing' -> 'None' (nothing can be applied app-only)
+        'New' is unchanged, and local/delegated runs (IsAzureAutomation = $false) are never
+        downgraded.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param
+    (
+        [Parameter(Mandatory = $true)] [ValidateSet('New', 'Existing', 'Both')] [string] $ApplyTo,
+        [Parameter(Mandatory = $true)] [bool] $IsAzureAutomation
+    )
+    if ($IsAzureAutomation -and ($ApplyTo -eq 'Existing' -or $ApplyTo -eq 'Both')) {
+        return $(if ($ApplyTo -eq 'Both') { 'New' } else { 'None' })
+    }
+    return $ApplyTo
+}
+
 function Get-TenantSiteUrls {
     <#
         .SYNOPSIS
@@ -748,48 +776,63 @@ foreach ($SiteUrl in $SiteUrls) {
         }
         else {
             # --- Site version policy mode: Set-PnPSiteVersionPolicy at the site level ---
-            # Get-/Set-PnPSiteVersionPolicy require a delegated user context that is site
-            # collection administrator. In Azure Automation (Managed Identity / app-only)
-            # there is no user context, so these calls may fail with an unauthorized error.
-            # Warn once so the failure mode is clear.
-            if (Test-IsAzureAutomation) {
+            # Get-/Set-PnPSiteVersionPolicy read and the site default / NEW-libraries write
+            # both work with app-only (Managed Identity) in Azure Automation. However,
+            # applying the policy to EXISTING document libraries is NOT supported app-only:
+            # SharePoint answers "Cannot call this API with an app-only principal." So in
+            # Azure Automation we drop the existing-libraries target (App-only can still set
+            # the site default that governs new libraries) and tell the user to run the
+            # existing-libraries pass locally / interactively with a SharePoint Administrator.
+            $effectiveApplyTo = Resolve-EffectiveApplyTo -ApplyTo $ApplyTo -IsAzureAutomation ([bool](Test-IsAzureAutomation))
+            if ($effectiveApplyTo -ne $ApplyTo) {
                 Write-Warning @"
-Site version policy (Get-/Set-PnPSiteVersionPolicy) requires a delegated user context
-that is site collection administrator. Running in Azure Automation (Managed Identity /
-app-only) may not be supported and can fail with an unauthorized error for site: $SiteUrl
+App-only (Managed Identity) cannot apply the version policy to EXISTING document libraries
+("Cannot call this API with an app-only principal"). Existing libraries are skipped in
+Azure Automation. Run VersionPolicyMode '$VersionPolicyMode' (ApplyTo=Existing) locally /
+interactively with a SharePoint Administrator to cover existing libraries for: $SiteUrl
 "@
             }
+
             Write-Output "Checking site version policy on $SiteUrl (Mode=$VersionPolicyMode)..."
-            try {
-                $hasDrift = Test-SiteVersionPolicyDrift -Mode $VersionPolicyMode `
-                    -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
-                    -ExpireAfterDays $ExpireVersionsAfterDays
-                if ($hasDrift) {
-                    if ($WhatIfPreference) {
-                        Write-Output "`tDrift detected. Would apply site version policy (DryRun; no change made)."
-                        Set-SiteVersionPolicy -SiteUrl $SiteUrl -Mode $VersionPolicyMode `
-                            -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
-                            -ExpireAfterDays $ExpireVersionsAfterDays -ApplyTo $ApplyTo
-                        Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'WouldApply' `
-                            -Detail "DryRun: would set Major=$KeepMajorVersions; ExpireAfterDays=$ExpireVersionsAfterDays"
+            if ($effectiveApplyTo -eq 'None') {
+                Write-Output "`tApp-only cannot target existing libraries; nothing to apply here. Skipped."
+                Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'Skipped' `
+                    -Detail 'App-only: existing document libraries require a delegated context; run locally/interactively.'
+            }
+            else {
+                # Note appended to output/results when the existing-libraries target was dropped for app-only.
+                $existingNote = if ($effectiveApplyTo -ne $ApplyTo) { ' (existing libraries skipped: app-only)' } else { '' }
+                try {
+                    $hasDrift = Test-SiteVersionPolicyDrift -Mode $VersionPolicyMode `
+                        -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
+                        -ExpireAfterDays $ExpireVersionsAfterDays
+                    if ($hasDrift) {
+                        if ($WhatIfPreference) {
+                            Write-Output "`tDrift detected. Would apply site version policy (DryRun; no change made).$existingNote"
+                            Set-SiteVersionPolicy -SiteUrl $SiteUrl -Mode $VersionPolicyMode `
+                                -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
+                                -ExpireAfterDays $ExpireVersionsAfterDays -ApplyTo $effectiveApplyTo
+                            Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Outcome 'WouldApply' `
+                                -Detail "DryRun: would set Major=$KeepMajorVersions; ExpireAfterDays=$ExpireVersionsAfterDays$existingNote"
+                        }
+                        else {
+                            Write-Output "`tDrift detected. Applying site version policy...$existingNote"
+                            Set-SiteVersionPolicy -SiteUrl $SiteUrl -Mode $VersionPolicyMode `
+                                -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
+                                -ExpireAfterDays $ExpireVersionsAfterDays -ApplyTo $effectiveApplyTo
+                            Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Outcome 'Applied' `
+                                -Detail "Major=$KeepMajorVersions; ExpireAfterDays=$ExpireVersionsAfterDays$existingNote"
+                        }
                     }
                     else {
-                        Write-Output "`tDrift detected. Applying site version policy..."
-                        Set-SiteVersionPolicy -SiteUrl $SiteUrl -Mode $VersionPolicyMode `
-                            -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
-                            -ExpireAfterDays $ExpireVersionsAfterDays -ApplyTo $ApplyTo
-                        Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'Applied' `
-                            -Detail "Major=$KeepMajorVersions; ExpireAfterDays=$ExpireVersionsAfterDays"
+                        Write-Output "`tNo drift. Site version policy already compliant; skipped."
+                        Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Outcome 'Skipped' -Detail 'No drift; already compliant'
                     }
                 }
-                else {
-                    Write-Output "`tNo drift. Site version policy already compliant; skipped."
-                    Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'Skipped' -Detail 'No drift; already compliant'
+                catch {
+                    Write-Warning "`tFAILED to apply site version policy on ${SiteUrl}: $($_.Exception.Message)"
+                    Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Outcome 'Failed' -Detail $_.Exception.Message
                 }
-            }
-            catch {
-                Write-Warning "`tFAILED to apply site version policy on ${SiteUrl}: $($_.Exception.Message)"
-                Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'Failed' -Detail $_.Exception.Message
             }
         }
 

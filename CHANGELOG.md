@@ -3,6 +3,30 @@
 The format is based on and uses the types of changes according to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-09-16
+
+### Changed
+
+- SPSCleanVersions.ps1
+  - **Azure Automation (app-only) — existing document libraries.** Applying a site
+    version policy to *existing* document libraries is not supported with app-only
+    (Managed Identity) authentication; SharePoint answers *"Cannot call this API with an
+    app-only principal."* Instead of hard-failing the whole site, the script now detects
+    the Azure Automation context and gracefully drops the existing-libraries target:
+    `ApplyTo=Both` is downgraded to `New` (the app-only-capable site default that governs
+    new libraries is still applied) and `ApplyTo=Existing` is skipped, each with an
+    explicit warning telling the user to run the existing-libraries pass locally /
+    interactively with a SharePoint Administrator. The run no longer reports a spurious
+    `Failed` for the part that cannot run app-only.
+
+### Documentation
+
+- Wiki
+  - Add an **"Azure Automation (app-only) limitations"** section listing exactly what
+    works and what does not under a Managed Identity runbook (site enumeration, policy
+    reads, Legacy mode and new-libraries writes work; existing-libraries writes and force
+    delete require a delegated context; no HTML report/transcript in the sandbox).
+
 ## [3.1.5] - 2026-09-16
 
 ### Fixed
