@@ -97,7 +97,7 @@
     FileName:	SPSCleanVersions.ps1
     Author:		Jean-Cyril DROUHIN
     Date:		September 16, 2026
-    Version:	3.1.5
+    Version:	3.2.0
 
     .LINK
     https://spjc.fr/
