@@ -436,8 +436,12 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'No drift'
         }
 
-        It 'Should not pass MajorWithMinorVersions for a new-libraries-only request' {
-            $scriptContent | Should -Match '\$applyExisting\s+-and\s+\$MajorWithMinorVersions'
+        It 'Should gate MajorWithMinorVersions on existing libraries, not on a minor count > 0' {
+            # Regression for #33: for existing document libraries in ExpireAfter/NoExpiration
+            # mode, SharePoint requires MajorWithMinorVersions even when it is 0, so the
+            # parameter must be gated on $applyExisting (plus the mode), never on a > 0 guard.
+            $scriptContent | Should -Match '\$applyExisting\s+-and\s+\(\$Mode\s+-eq'
+            $scriptContent | Should -Not -Match '\$MajorWithMinorVersions\s+-gt\s+0'
         }
 
         It 'Should warn about the app-only limitation in Azure Automation' {

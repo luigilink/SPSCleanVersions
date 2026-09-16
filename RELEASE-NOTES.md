@@ -1,16 +1,17 @@
 # SPSCleanVersions - Release Notes
 
-## [3.1.4] - 2026-07-15
+## [3.1.5] - 2026-09-16
 
-### Added
+### Fixed
 
-- CI/CD
-  - Publish the script to the **PowerShell Gallery** on tagged releases
-    (`Publish-Script` step in `release.yml`). Install with
-    `Install-Script -Name SPSCleanVersions`. Requires the `PSGALLERYKEY`
-    repository secret
-- Documentation
-  - Add PowerShell Gallery install instructions (Getting Started, README) and a
-    PSGallery version badge
+- SPSCleanVersions.ps1
+  - **Site version policy (`ExpireAfter` / `NoExpiration`)** — applying the policy to
+    existing document libraries no longer fails when no minor-version count is configured
+    (`KeepMinorVersions` absent / `0`). `MajorWithMinorVersions` is now sent (including
+    `0`) whenever existing libraries are targeted, and still omitted for
+    new-libraries-only requests. Fixes *"You must specify ExpireVersionsAfterDays,
+    MajorVersions and MajorWithMinorVersions when EnableAutoExpirationVersionTrim is false
+    for document libraries that including existing ones."*
+    ([#33](https://github.com/luigilink/SPSCleanVersions/issues/33))
 
 A full list of changes in each version can be found in the [change log](CHANGELOG.md)
