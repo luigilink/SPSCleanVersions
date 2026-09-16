@@ -382,14 +382,52 @@ Describe 'SPSCleanVersions Script' {
         It 'Should support InheritFromTenant' {
             $scriptContent | Should -Match 'InheritFromTenant'
         }
+    }
 
-        It 'Should drop the existing-libraries target under app-only (Azure Automation)' {
-            # Enhancement #35: app-only cannot apply the policy to existing document libraries
-            # ("Cannot call this API with an app-only principal"). In Azure Automation the
-            # script downgrades ApplyTo (Both -> New, Existing -> None) instead of hard-failing.
-            $scriptContent | Should -Match '\$effectiveApplyTo'
-            $scriptContent | Should -Match 'cannot apply the version policy to EXISTING'
-            $scriptContent | Should -Match "\{\s*'New'\s*\}\s*else\s*\{\s*'None'\s*\}"
+    Context 'Resolve-EffectiveApplyTo (functional)' {
+
+        BeforeAll {
+            # Extract and dot-source the real Resolve-EffectiveApplyTo from the script AST so
+            # we test the actual downgrade decision, not a source-text pattern. Regression for
+            # #35: app-only cannot target existing document libraries, so in Azure Automation
+            # Both -> New and Existing -> None; local/delegated runs are never downgraded.
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Resolve-EffectiveApplyTo' }, $true) | Select-Object -First 1
+            . ([ScriptBlock]::Create($fn.Extent.Text))
+        }
+
+        It 'Azure Automation + Both downgrades to New' {
+            Resolve-EffectiveApplyTo -ApplyTo 'Both' -IsAzureAutomation $true | Should -Be 'New'
+        }
+
+        It 'Azure Automation + Existing downgrades to None' {
+            Resolve-EffectiveApplyTo -ApplyTo 'Existing' -IsAzureAutomation $true | Should -Be 'None'
+        }
+
+        It 'Azure Automation + New stays New' {
+            Resolve-EffectiveApplyTo -ApplyTo 'New' -IsAzureAutomation $true | Should -Be 'New'
+        }
+
+        It 'Local (delegated) never downgrades Both' {
+            Resolve-EffectiveApplyTo -ApplyTo 'Both' -IsAzureAutomation $false | Should -Be 'Both'
+        }
+
+        It 'Local (delegated) never downgrades Existing' {
+            Resolve-EffectiveApplyTo -ApplyTo 'Existing' -IsAzureAutomation $false | Should -Be 'Existing'
+        }
+    }
+
+    Context 'App-only downgrade wiring' {
+
+        It 'Passes the resolved effective target to the setter and warns only on a real downgrade' {
+            # The loop computes $effectiveApplyTo via Resolve-EffectiveApplyTo, passes it to
+            # Set-SiteVersionPolicy, warns only when it differs from the requested ApplyTo, and
+            # records Skipped (without invoking the setter) when it resolves to 'None'.
+            $scriptContent | Should -Match 'Resolve-EffectiveApplyTo\s+-ApplyTo\s+\$ApplyTo\s+-IsAzureAutomation'
+            $scriptContent | Should -Match 'if\s*\(\s*\$effectiveApplyTo\s+-ne\s+\$ApplyTo\s*\)'
+            $scriptContent | Should -Match '-ApplyTo\s+\$effectiveApplyTo'
+            $scriptContent | Should -Match "if\s*\(\s*\`$effectiveApplyTo\s+-eq\s+'None'\s*\)"
         }
     }
 

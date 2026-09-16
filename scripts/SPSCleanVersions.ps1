@@ -607,6 +607,34 @@ function Set-SiteVersionPolicy {
     }
 }
 
+function Resolve-EffectiveApplyTo {
+    <#
+        .SYNOPSIS
+        Resolves the ApplyTo target actually usable in the current authentication context.
+
+        .DESCRIPTION
+        Applying a site version policy to EXISTING document libraries is not supported with
+        app-only authentication (Azure Automation / Managed Identity): SharePoint answers
+        "Cannot call this API with an app-only principal." In that context this function
+        downgrades the target so the run does the app-only-capable work instead of failing:
+          - 'Both'     -> 'New'  (keep the site default that governs new libraries)
+          - 'Existing' -> 'None' (nothing can be applied app-only)
+        'New' is unchanged, and local/delegated runs (IsAzureAutomation = $false) are never
+        downgraded.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param
+    (
+        [Parameter(Mandatory = $true)] [ValidateSet('New', 'Existing', 'Both')] [string] $ApplyTo,
+        [Parameter(Mandatory = $true)] [bool] $IsAzureAutomation
+    )
+    if ($IsAzureAutomation -and ($ApplyTo -eq 'Existing' -or $ApplyTo -eq 'Both')) {
+        return $(if ($ApplyTo -eq 'Both') { 'New' } else { 'None' })
+    }
+    return $ApplyTo
+}
+
 function Get-TenantSiteUrls {
     <#
         .SYNOPSIS
@@ -755,16 +783,14 @@ foreach ($SiteUrl in $SiteUrls) {
             # Azure Automation we drop the existing-libraries target (App-only can still set
             # the site default that governs new libraries) and tell the user to run the
             # existing-libraries pass locally / interactively with a SharePoint Administrator.
-            $effectiveApplyTo = $ApplyTo
-            if ((Test-IsAzureAutomation) -and ($ApplyTo -eq 'Existing' -or $ApplyTo -eq 'Both')) {
+            $effectiveApplyTo = Resolve-EffectiveApplyTo -ApplyTo $ApplyTo -IsAzureAutomation ([bool](Test-IsAzureAutomation))
+            if ($effectiveApplyTo -ne $ApplyTo) {
                 Write-Warning @"
 App-only (Managed Identity) cannot apply the version policy to EXISTING document libraries
 ("Cannot call this API with an app-only principal"). Existing libraries are skipped in
 Azure Automation. Run VersionPolicyMode '$VersionPolicyMode' (ApplyTo=Existing) locally /
 interactively with a SharePoint Administrator to cover existing libraries for: $SiteUrl
 "@
-                # 'Both' -> keep the app-only-capable NEW/site part; 'Existing' -> nothing to do app-only.
-                $effectiveApplyTo = if ($ApplyTo -eq 'Both') { 'New' } else { 'None' }
             }
 
             Write-Output "Checking site version policy on $SiteUrl (Mode=$VersionPolicyMode)..."
