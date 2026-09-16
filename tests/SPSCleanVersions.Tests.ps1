@@ -417,6 +417,76 @@ Describe 'SPSCleanVersions Script' {
         }
     }
 
+    Context 'Site version policy parameter building (functional)' {
+
+        BeforeAll {
+            # Mirror the parameter-building logic of Set-SiteVersionPolicy so the actual
+            # values passed to Set-PnPSiteVersionPolicy can be asserted (regression for #33:
+            # MajorWithMinorVersions must be sent, including 0, for existing libraries).
+            function Build-VersionPolicyParams {
+                param(
+                    [string]$Mode,
+                    [int]$MajorVersions,
+                    [int]$MajorWithMinorVersions,
+                    [int]$ExpireAfterDays,
+                    [string]$ApplyTo = 'Both'
+                )
+                $params = @{}
+                switch ($Mode) {
+                    'InheritFromTenant' { $params['InheritFromTenant'] = $true }
+                    'AutoExpiration' { $params['EnableAutoExpirationVersionTrim'] = $true }
+                    'ExpireAfter' {
+                        $params['EnableAutoExpirationVersionTrim'] = $false
+                        $params['ExpireVersionsAfterDays'] = $ExpireAfterDays
+                        $params['MajorVersions'] = $MajorVersions
+                    }
+                    'NoExpiration' {
+                        $params['EnableAutoExpirationVersionTrim'] = $false
+                        $params['ExpireVersionsAfterDays'] = 0
+                        $params['MajorVersions'] = $MajorVersions
+                    }
+                }
+                $applyNew = ($ApplyTo -eq 'New' -or $ApplyTo -eq 'Both')
+                $applyExisting = ($ApplyTo -eq 'Existing' -or $ApplyTo -eq 'Both')
+                if ($applyNew) { $params['ApplyToNewDocumentLibraries'] = $true }
+                if ($applyExisting) { $params['ApplyToExistingDocumentLibraries'] = $true }
+                if ($applyExisting -and ($Mode -eq 'ExpireAfter' -or $Mode -eq 'NoExpiration')) {
+                    $params['MajorWithMinorVersions'] = $MajorWithMinorVersions
+                }
+                return $params
+            }
+        }
+
+        It 'ExpireAfter + Existing with 0 minor: sends MajorWithMinorVersions = 0' {
+            $p = Build-VersionPolicyParams -Mode 'ExpireAfter' -MajorVersions 100 -MajorWithMinorVersions 0 -ExpireAfterDays 365 -ApplyTo 'Existing'
+            $p.ContainsKey('MajorWithMinorVersions') | Should -BeTrue
+            $p['MajorWithMinorVersions'] | Should -Be 0
+        }
+
+        It 'ExpireAfter + Both with 0 minor: sends MajorWithMinorVersions = 0' {
+            $p = Build-VersionPolicyParams -Mode 'ExpireAfter' -MajorVersions 100 -MajorWithMinorVersions 0 -ExpireAfterDays 365 -ApplyTo 'Both'
+            $p.ContainsKey('MajorWithMinorVersions') | Should -BeTrue
+            $p['MajorWithMinorVersions'] | Should -Be 0
+        }
+
+        It 'NoExpiration + Existing with 0 minor: sends MajorWithMinorVersions = 0' {
+            $p = Build-VersionPolicyParams -Mode 'NoExpiration' -MajorVersions 100 -MajorWithMinorVersions 0 -ExpireAfterDays 0 -ApplyTo 'Existing'
+            $p.ContainsKey('MajorWithMinorVersions') | Should -BeTrue
+            $p['MajorWithMinorVersions'] | Should -Be 0
+        }
+
+        It 'ExpireAfter + Existing with a positive minor count: sends that value' {
+            $p = Build-VersionPolicyParams -Mode 'ExpireAfter' -MajorVersions 100 -MajorWithMinorVersions 5 -ExpireAfterDays 365 -ApplyTo 'Existing'
+            $p['MajorWithMinorVersions'] | Should -Be 5
+        }
+
+        It 'ExpireAfter + New only: omits MajorWithMinorVersions' {
+            $p = Build-VersionPolicyParams -Mode 'ExpireAfter' -MajorVersions 100 -MajorWithMinorVersions 0 -ExpireAfterDays 365 -ApplyTo 'New'
+            $p.ContainsKey('MajorWithMinorVersions') | Should -BeFalse
+            $p.ContainsKey('ApplyToExistingDocumentLibraries') | Should -BeFalse
+        }
+    }
+
     Context 'Site version policy drift detection' {
 
         It 'Should define the Test-SiteVersionPolicyDrift helper function' {
