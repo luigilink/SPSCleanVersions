@@ -3,6 +3,23 @@
 The format is based on and uses the types of changes according to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.5] - 2026-09-16
+
+### Fixed
+
+- SPSCleanVersions.ps1
+  - **Site version policy (`ExpireAfter` / `NoExpiration`)** — applying the policy to
+    existing document libraries no longer fails when no minor-version count is configured
+    (`KeepMinorVersions` absent / `0`). `MajorWithMinorVersions` was gated by a `-gt 0`
+    guard, so it was dropped when the value was `0`; SharePoint requires all three of
+    `ExpireVersionsAfterDays`, `MajorVersions` and `MajorWithMinorVersions` for requests
+    that target existing libraries with `EnableAutoExpirationVersionTrim = $false`. The
+    parameter is now sent (including `0`) whenever existing libraries are targeted, and
+    still omitted for new-libraries-only requests. Fixes the error *"You must specify
+    ExpireVersionsAfterDays, MajorVersions and MajorWithMinorVersions when
+    EnableAutoExpirationVersionTrim is false for document libraries that including
+    existing ones."* ([#33](https://github.com/luigilink/SPSCleanVersions/issues/33))
+
 ## [3.1.4] - 2026-07-15
 
 ### Added

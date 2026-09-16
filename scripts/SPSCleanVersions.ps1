@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-    .VERSION 3.1.4
+    .VERSION 3.1.5
 
     .GUID 7ecf4acd-17c4-4c50-be79-1fcf2b6611fe
 
@@ -96,8 +96,8 @@
     .NOTES
     FileName:	SPSCleanVersions.ps1
     Author:		Jean-Cyril DROUHIN
-    Date:		July 15, 2026
-    Version:	3.1.4
+    Date:		September 16, 2026
+    Version:	3.1.5
 
     .LINK
     https://spjc.fr/
@@ -441,7 +441,7 @@ function Clear-OldRunFiles {
 # Run context: local writes transcript + report files; Azure Automation emits the report
 # into the output stream (no persistent filesystem).
 $script:IsAzureAutomationRun = Test-IsAzureAutomation
-$script:ScriptVersion = '3.1.4'
+$script:ScriptVersion = '3.1.5'
 $script:RunTimestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $script:LogsFolder = $null
 $script:ResultsFolder = $null
@@ -589,11 +589,15 @@ function Set-SiteVersionPolicy {
     if ($applyNew) { $params['ApplyToNewDocumentLibraries'] = $true }
     if ($applyExisting) { $params['ApplyToExistingDocumentLibraries'] = $true }
 
-    # MajorWithMinorVersions is only accepted when the request targets existing document
-    # libraries. Set-PnPSiteVersionPolicy rejects it for a new-libraries-only request when
-    # EnableAutoExpirationVersionTrim is $false. Only add it for ExpireAfter/NoExpiration
-    # requests that include existing libraries.
-    if ($applyExisting -and $MajorWithMinorVersions -gt 0 -and ($Mode -eq 'ExpireAfter' -or $Mode -eq 'NoExpiration')) {
+    # MajorWithMinorVersions handling for ExpireAfter/NoExpiration (EnableAutoExpirationVersionTrim = $false):
+    #   - For requests that include existing document libraries, SharePoint REQUIRES all three of
+    #     ExpireVersionsAfterDays, MajorVersions and MajorWithMinorVersions to be specified — even
+    #     when MajorWithMinorVersions is 0. Omitting it fails with "You must specify
+    #     ExpireVersionsAfterDays, MajorVersions and MajorWithMinorVersions ... for document
+    #     libraries that including existing ones."
+    #   - It is rejected for a new-libraries-only request, so only add it when existing libraries
+    #     are targeted.
+    if ($applyExisting -and ($Mode -eq 'ExpireAfter' -or $Mode -eq 'NoExpiration')) {
         $params['MajorWithMinorVersions'] = $MajorWithMinorVersions
     }
 

@@ -417,6 +417,76 @@ Describe 'SPSCleanVersions Script' {
         }
     }
 
+    Context 'Set-SiteVersionPolicy bound parameters (functional)' {
+
+        BeforeAll {
+            # Extract and dot-source the REAL Set-SiteVersionPolicy from the script AST (same
+            # approach as the report tests) so we assert the parameters actually bound to
+            # Set-PnPSiteVersionPolicy, not a copy of the logic. Regression for #33:
+            # MajorWithMinorVersions must be bound (including 0) for existing libraries and
+            # omitted for a new-libraries-only request.
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-SiteVersionPolicy' }, $true) | Select-Object -First 1
+            . ([ScriptBlock]::Create($fn.Extent.Text))
+
+            # Local stub so Set-PnPSiteVersionPolicy is mockable without importing
+            # PnP.PowerShell. Its parameters mirror what the script splats, so the mock's
+            # ParameterFilter can inspect the bound values.
+            function Set-PnPSiteVersionPolicy {
+                [CmdletBinding()]
+                param(
+                    [switch] $EnableAutoExpirationVersionTrim,
+                    [int] $ExpireVersionsAfterDays,
+                    [int] $MajorVersions,
+                    [int] $MajorWithMinorVersions,
+                    [switch] $ApplyToNewDocumentLibraries,
+                    [switch] $ApplyToExistingDocumentLibraries,
+                    [switch] $InheritFromTenant
+                )
+            }
+        }
+
+        BeforeEach {
+            Mock Set-PnPSiteVersionPolicy { }
+        }
+
+        It 'ExpireAfter + Existing with 0 minor: binds MajorWithMinorVersions = 0' {
+            Set-SiteVersionPolicy -SiteUrl 'https://x/sites/A' -Mode 'ExpireAfter' -MajorVersions 100 -MajorWithMinorVersions 0 -ExpireAfterDays 365 -ApplyTo 'Existing'
+            Should -Invoke Set-PnPSiteVersionPolicy -Times 1 -Exactly -ParameterFilter {
+                $null -ne $MajorWithMinorVersions -and $MajorWithMinorVersions -eq 0 -and $ApplyToExistingDocumentLibraries
+            }
+        }
+
+        It 'ExpireAfter + Both with 0 minor: binds MajorWithMinorVersions = 0' {
+            Set-SiteVersionPolicy -SiteUrl 'https://x/sites/A' -Mode 'ExpireAfter' -MajorVersions 100 -MajorWithMinorVersions 0 -ExpireAfterDays 365 -ApplyTo 'Both'
+            Should -Invoke Set-PnPSiteVersionPolicy -Times 1 -Exactly -ParameterFilter {
+                $null -ne $MajorWithMinorVersions -and $MajorWithMinorVersions -eq 0
+            }
+        }
+
+        It 'NoExpiration + Existing with 0 minor: binds MajorWithMinorVersions = 0' {
+            Set-SiteVersionPolicy -SiteUrl 'https://x/sites/A' -Mode 'NoExpiration' -MajorVersions 100 -MajorWithMinorVersions 0 -ExpireAfterDays 0 -ApplyTo 'Existing'
+            Should -Invoke Set-PnPSiteVersionPolicy -Times 1 -Exactly -ParameterFilter {
+                $null -ne $MajorWithMinorVersions -and $MajorWithMinorVersions -eq 0
+            }
+        }
+
+        It 'ExpireAfter + Existing with a positive minor count: binds that value' {
+            Set-SiteVersionPolicy -SiteUrl 'https://x/sites/A' -Mode 'ExpireAfter' -MajorVersions 100 -MajorWithMinorVersions 5 -ExpireAfterDays 365 -ApplyTo 'Existing'
+            Should -Invoke Set-PnPSiteVersionPolicy -Times 1 -Exactly -ParameterFilter {
+                $MajorWithMinorVersions -eq 5
+            }
+        }
+
+        It 'ExpireAfter + New only: omits MajorWithMinorVersions and the existing target' {
+            Set-SiteVersionPolicy -SiteUrl 'https://x/sites/A' -Mode 'ExpireAfter' -MajorVersions 100 -MajorWithMinorVersions 0 -ExpireAfterDays 365 -ApplyTo 'New'
+            Should -Invoke Set-PnPSiteVersionPolicy -Times 1 -Exactly -ParameterFilter {
+                ($null -eq $MajorWithMinorVersions) -and ($null -eq $ApplyToExistingDocumentLibraries) -and $ApplyToNewDocumentLibraries
+            }
+        }
+    }
+
     Context 'Site version policy drift detection' {
 
         It 'Should define the Test-SiteVersionPolicyDrift helper function' {
@@ -436,8 +506,12 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'No drift'
         }
 
-        It 'Should not pass MajorWithMinorVersions for a new-libraries-only request' {
-            $scriptContent | Should -Match '\$applyExisting\s+-and\s+\$MajorWithMinorVersions'
+        It 'Should gate MajorWithMinorVersions on existing libraries, not on a minor count > 0' {
+            # Regression for #33: for existing document libraries in ExpireAfter/NoExpiration
+            # mode, SharePoint requires MajorWithMinorVersions even when it is 0, so the
+            # parameter must be gated on $applyExisting (plus the mode), never on a > 0 guard.
+            $scriptContent | Should -Match '\$applyExisting\s+-and\s+\(\$Mode\s+-eq'
+            $scriptContent | Should -Not -Match '\$MajorWithMinorVersions\s+-gt\s+0'
         }
 
         It 'Should warn about the app-only limitation in Azure Automation' {
