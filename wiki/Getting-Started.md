@@ -58,7 +58,24 @@ Validated setup for running the script as an Azure Automation runbook:
    {"SiteUrls":["https://contoso.sharepoint.com/sites/Team"],"VersionPolicyMode":"Legacy","KeepMajorVersions":50,"DryRun":true}
    ```
 
-> **Note on the site version policy modes in a runbook.** `Legacy` works with the Managed Identity (app-only). The site version policy modes (`AutoExpiration`, `ExpireAfter`, `NoExpiration`, `InheritFromTenant`) call `Get-`/`Set-PnPSiteVersionPolicy`, which require a **delegated** site-collection-admin context and may fail app-only — the script warns about this. For those modes, prefer running interactively/locally with a SharePoint Administrator account.
+> **Note on the site version policy modes in a runbook.** `Legacy` works with the Managed Identity (app-only). For the site version policy modes (`AutoExpiration`, `ExpireAfter`, `NoExpiration`, `InheritFromTenant`), reads (`Get-PnPSiteVersionPolicy`) and the **site default that governs new libraries** work app-only, but applying the policy to **existing** document libraries does **not** (`Set-PnPSiteVersionPolicy -ApplyToExistingDocumentLibraries` fails with *"Cannot call this API with an app-only principal"*). See the limitations table below.
+
+### Azure Automation (app-only) limitations
+
+When the script runs as a runbook it authenticates with the Automation Account's **Managed Identity** (app-only). Some SharePoint APIs require a **delegated** user context and therefore cannot run app-only. The script detects the runbook context and degrades gracefully (warns and skips) instead of failing hard.
+
+| Capability | App-only (runbook) | Notes |
+|---|---|---|
+| Enumerate tenant sites (`Get-PnPTenantSite`, `SiteScope: All`) | ✅ Works | Confirmed with Managed Identity. |
+| Read the site version policy (`Get-PnPSiteVersionPolicy`, drift detection) | ✅ Works | Reads succeed app-only. |
+| `Legacy` mode — per-library major/minor limits (`Set-PnPList`) | ✅ Works | Fully supported app-only. |
+| Site version policy → **site default / new libraries** (`-ApplyToNewDocumentLibraries`) | ✅ Works | *"The setting for new libraries takes effect immediately."* |
+| Site version policy → **existing libraries** (`-ApplyToExistingDocumentLibraries`) | ❌ Not supported | *"Cannot call this API with an app-only principal."* In a runbook, `ApplyTo=Both` is downgraded to `New` and `ApplyTo=Existing` is skipped, with a warning. |
+| Force delete old versions (`New-PnPSiteFileVersionBatchDeleteJob`, `ForceDeleteOldVersions`) | ❌ Not supported | Requires a delegated context; auto-skipped in Azure Automation. |
+| HTML report / transcript | ❌ Not produced | The Automation sandbox has no persistent filesystem; per-site actions and the summary line appear in the job output instead. |
+| Interactive login | ❌ Not available | Managed Identity only — there is no user context. |
+
+> **To cover existing document libraries**, run the same mode **locally / interactively** with a **SharePoint Administrator** account, e.g. `ApplyTo=Existing` with a `ClientId` (App Registration) for interactive PnP sign-in. The runbook handles the site default and new libraries; the local delegated run handles existing libraries.
 
 ## Next Step
 

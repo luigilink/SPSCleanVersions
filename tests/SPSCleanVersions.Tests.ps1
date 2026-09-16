@@ -382,6 +382,15 @@ Describe 'SPSCleanVersions Script' {
         It 'Should support InheritFromTenant' {
             $scriptContent | Should -Match 'InheritFromTenant'
         }
+
+        It 'Should drop the existing-libraries target under app-only (Azure Automation)' {
+            # Enhancement #35: app-only cannot apply the policy to existing document libraries
+            # ("Cannot call this API with an app-only principal"). In Azure Automation the
+            # script downgrades ApplyTo (Both -> New, Existing -> None) instead of hard-failing.
+            $scriptContent | Should -Match '\$effectiveApplyTo'
+            $scriptContent | Should -Match 'cannot apply the version policy to EXISTING'
+            $scriptContent | Should -Match "\{\s*'New'\s*\}\s*else\s*\{\s*'None'\s*\}"
+        }
     }
 
     Context 'Site version policy (functional)' {
@@ -445,7 +454,10 @@ Describe 'SPSCleanVersions Script' {
         }
 
         It 'Should warn about the app-only limitation in Azure Automation' {
-            $scriptContent | Should -Match 'require a delegated user context'
+            # #35: the warning now targets the specific unsupported operation (existing
+            # document libraries) rather than a blanket delegated-context message.
+            $scriptContent | Should -Match 'cannot apply the version policy to EXISTING'
+            $scriptContent | Should -Match 'Cannot call this API with an app-only principal'
         }
 
         It 'Should define the Get-TenantSiteUrls helper function' {
