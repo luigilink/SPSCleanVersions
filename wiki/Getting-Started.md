@@ -24,6 +24,27 @@ This tool relies on the PnP.PowerShell module version 2.12.0 or later. [Installa
 * **Role:** SharePoint Administrator or Global Administrator.
 * **API Permissions:** `Sites.FullControl.All` (when using App Registration).
 
+### Local authentication (interactive) — `ClientId` required
+
+For **local execution**, the script signs in interactively and therefore needs an Azure AD
+App Registration. Register one once (public client, `http://localhost` redirect,
+delegated `Sites.FullControl.All`):
+
+```powershell
+Register-PnPEntraIDAppForInteractiveLogin -ApplicationName "SPSCleanVersions" -Tenant <tenant>.onmicrosoft.com -Interactive
+```
+
+Pass the resulting **Client ID** as the `ClientId` config property. `ClientId` is
+**mandatory** for local runs (the script raises a clear error if it is missing).
+
+> **Batch runs sign in once.** For a list of many sites the script signs in interactively
+> **once** (to the first site) and then reuses the delegated SharePoint token — which is
+> valid tenant-wide — for every site, refreshing it silently via MSAL before it expires.
+> You are prompted a single time, not once per site, so batches of hundreds/thousands of
+> sites run unattended after the initial sign-in. Keep the machine awake and the sign-in
+> session fresh; a tenant Conditional Access policy that forces re-authentication mid-run
+> can still interrupt a very long batch.
+
 ## Installation
 
 Install from the [PowerShell Gallery](https://www.powershellgallery.com/packages/SPSCleanVersions):

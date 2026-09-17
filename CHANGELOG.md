@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - SPSCleanVersions.ps1
+  - **Local execution — single sign-in with delegated token reuse.** Local runs no longer
+    call `Connect-PnPOnline -Interactive` once per site (which re-prompts for a browser
+    login on every site and makes batches of hundreds/thousands of sites unusable).
+    Instead the script signs in interactively **once** to an anchor site, then reuses the
+    delegated SharePoint access token — which is valid tenant-wide — for every site, re-read
+    each iteration so MSAL refreshes it silently before expiry. Falls back to per-site
+    interactive if the single sign-in fails. `ClientId` is now **required** for local
+    execution, with a clear error pointing to `Register-PnPEntraIDAppForInteractiveLogin`.
+    ([#37](https://github.com/luigilink/SPSCleanVersions/issues/37))
   - **Azure Automation (app-only) — existing document libraries.** Applying a site
     version policy to *existing* document libraries is not supported with app-only
     (Managed Identity) authentication; SharePoint answers *"Cannot call this API with an
