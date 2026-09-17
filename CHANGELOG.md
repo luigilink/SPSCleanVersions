@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - SPSCleanVersions.ps1
+  - **Full reporting: per-library rows and structured columns.** The HTML report now has
+    dedicated **Library**, **Major**, **Minor** and **ExpireAfterDays** columns. In
+    **Legacy** mode each processed document library is reported as its own row with its real
+    outcome (Applied / Compliant / Failed, or WouldApply in DryRun). In the site version
+    policy modes the site-level row now carries the Major / ExpireAfterDays values, and an
+    optional `EnumerateLibraries` config property (default `false`) lists the document
+    libraries *in scope* (`InScope` rows — informative only, since the policy applies to
+    existing libraries via an asynchronous server job with no per-library status; enabling it
+    adds a `Get-PnPList` per site). A machine-readable **`results.json`** is written next to
+    the HTML report for auditing, re-processing (Excel / Power BI) or diffing runs. The
+    multi-thread run carries these fields through the worker → parent merge into the single
+    consolidated report.
   - **Multi-threading (local only).** New `Threads` config property (default `1` =
     sequential). When `Threads > 1` on a local run with more than one site, the site list is
     split across that many child `pwsh` processes that all share the **single** interactive
