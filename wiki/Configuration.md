@@ -48,6 +48,7 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 | `SiteFilter` | string | No | — | Optional server-side `-Filter` passed to `Get-PnPTenantSite` to narrow the enumeration when `SiteScope` is `All` (e.g. `"Url -like 'sales'"`). |
 | `EnableReport` | boolean | No | `true` | Write a local HTML report of the run to `Results/`. **Local execution only** — no report is produced when running in Azure Automation. |
 | `LogRetentionDays` | integer | No | `180` | Prune `Logs/` and `Results/` files older than this many days (local only). `0` disables pruning. |
+| `Threads` | integer | No | `1` | **Local only.** Number of parallel worker processes. `1` = sequential (default). `> 1` splits the site list across that many child `pwsh` processes that share the single interactive sign-in via a secured token file, then merges their results into one consolidated HTML report. Capped at 16; high values may trigger SharePoint throttling. Ignored in Azure Automation (always sequential). |
 
 ## Version policy modes
 
