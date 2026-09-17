@@ -870,6 +870,34 @@ Describe 'SPSCleanVersions Script' {
             $script:calls | Should -Be 3
         }
 
+        It 'Invoke-RetryCommand honours a Retry-After hint (capped) instead of backoff' {
+            # Mock Start-Sleep so the test is fast and we can assert the delay used. The first
+            # attempt throws a throttling error carrying "Retry-After: 120"; the retry must
+            # sleep for that server-provided value (120s), not the exponential backoff.
+            $script:sleptFor = $null
+            Mock -CommandName Start-Sleep -MockWith { param($Seconds) $script:sleptFor = $Seconds }
+            $script:calls = 0
+            $result = Invoke-RetryCommand -OperationName 'throttled' -BaseDelaySeconds 5 -MaxRetries 3 -ScriptBlock {
+                $script:calls++
+                if ($script:calls -lt 2) { throw 'Request was throttled. Retry-After: 120' }
+                'ok'
+            }
+            $result | Should -Be 'ok'
+            $script:sleptFor | Should -Be 120
+        }
+
+        It 'Invoke-RetryCommand caps a very large Retry-After at 300s' {
+            $script:sleptFor = $null
+            Mock -CommandName Start-Sleep -MockWith { param($Seconds) $script:sleptFor = $Seconds }
+            $script:calls = 0
+            $null = Invoke-RetryCommand -OperationName 'throttled-big' -BaseDelaySeconds 5 -MaxRetries 3 -ScriptBlock {
+                $script:calls++
+                if ($script:calls -lt 2) { throw 'Throttled. Retry-After: 999' }
+                'ok'
+            }
+            $script:sleptFor | Should -Be 300
+        }
+
         It 'Get-RetryAfterDelay reads a Retry-After hint from the message' {
             $err = try { throw 'Request throttled. Retry-After: 42' } catch { $_ }
             Get-RetryAfterDelay -ErrorRecord $err | Should -Be 42

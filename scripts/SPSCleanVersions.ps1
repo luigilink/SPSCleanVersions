@@ -874,7 +874,7 @@ foreach ($SiteUrl in $SiteUrls) {
             # --- Legacy mode: per-library count-based limits via Set-PnPList ---
             # Get all Lists in the Site
             Write-Output "Retrieving lists from $SiteUrl..."
-            $allLists = Invoke-RetryCommand -OperationName 'Get-PnPList' -ScriptBlock { Get-PnPList }
+            $allLists = Invoke-RetryCommand -OperationName 'Get-PnPList' -ScriptBlock { Get-PnPList -ErrorAction Stop }
             $targetLists = $allLists | Where-Object {
                 $_.Hidden -eq $false -and
                 $_.EnableVersioning -eq $true -and
