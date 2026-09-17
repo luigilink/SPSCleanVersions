@@ -742,6 +742,53 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'function\s+Add-RunResult'
         }
 
+        It 'Add-RunResult carries the structured Library/Major/Minor/ExpireAfterDays fields' {
+            $scriptContent | Should -Match "Add-RunResult\b[\s\S]*Library\s*=\s*\`$Library"
+            $scriptContent | Should -Match 'Major\s*=\s*\$Major'
+            $scriptContent | Should -Match 'Minor\s*=\s*\$Minor'
+            $scriptContent | Should -Match 'ExpireAfterDays\s*=\s*\$ExpireAfterDays'
+        }
+
+        It 'Legacy mode emits one result row per library' {
+            $scriptContent | Should -Match "Add-RunResult -SiteUrl \`$SiteUrl -Scope 'Legacy' -Library \`$list\.Title -Outcome 'Applied'"
+            $scriptContent | Should -Match "Add-RunResult -SiteUrl \`$SiteUrl -Scope 'Legacy' -Library \`$list\.Title -Outcome 'Compliant'"
+            $scriptContent | Should -Match "Add-RunResult -SiteUrl \`$SiteUrl -Scope 'Legacy' -Library \`$list\.Title -Outcome 'WouldApply'"
+        }
+
+        It 'Site-policy mode can enumerate in-scope libraries when EnumerateLibraries is set' {
+            $scriptContent | Should -Match "config.PSObject.Properties\['EnumerateLibraries'\]"
+            # Only enumerate when the effective target actually includes existing libraries.
+            $scriptContent | Should -Match '\$EnumerateLibraries -and \(\$effectiveApplyTo -eq ''Both'' -or \$effectiveApplyTo -eq ''Existing''\)'
+            $scriptContent | Should -Match "-Outcome 'InScope'"
+        }
+
+        It 'Writes a machine-readable JSON alongside the HTML report' {
+            $scriptContent | Should -Match 'SPSCleanVersions-\$\(\$script:RunTimestamp\)\.json'
+            $scriptContent | Should -Match 'JSON results written to:'
+            # Guard against the "Argument types do not match" failure: serialize the List via
+            # .ToArray() / -InputObject, never `@($List) | ConvertTo-Json`.
+            $scriptContent | Should -Match 'ConvertTo-Json -InputObject \$jsonRows'
+            $scriptContent | Should -Not -Match '@\(\$script:RunResults\) \| ConvertTo-Json'
+            # JSON emission is outside the non-empty HTML gate (empty run still yields []).
+            $scriptContent | Should -Match "if \(\`$EnableReport -and -not \`$script:IsAzureAutomationRun -and -not \`$IsWorker\)"
+            # results.json is covered by retention pruning.
+            $scriptContent | Should -Match "Clear-OldRunFiles -Path \`$script:ResultsFolder -Retention \`$LogRetentionDays -Filter '\*\.json'"
+        }
+
+        It 'Legacy real-mutation path keeps the ShouldProcess (-Confirm) gate' {
+            $scriptContent | Should -Match "ShouldProcess\(\`$list\.Title, 'Set versioning policy'\)"
+        }
+
+        It 'HTML report card counts distinct sites, not rows' {
+            $scriptContent | Should -Match '\$distinctSites = @\(\$rows'
+            $scriptContent | Should -Match '<div class="card-value">\$distinctSites</div><div class="card-label">Sites processed</div>'
+        }
+
+        It 'Multi-thread merge carries the structured fields back from workers' {
+            $scriptContent | Should -Match '-Library \(\[string\]\$row\.Library\)'
+            $scriptContent | Should -Match '-ExpireAfterDays \(\[string\]\$row\.ExpireAfterDays\)'
+        }
+
         It 'Should start a transcript for local runs' {
             $scriptContent | Should -Match 'Start-Transcript'
             $scriptContent | Should -Match 'Stop-Transcript'
@@ -770,15 +817,26 @@ Describe 'SPSCleanVersions Script' {
                 foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
 
                 $script:sample = New-Object System.Collections.Generic.List[object]
-                $script:sample.Add([PSCustomObject]@{ Site = 'https://x/sites/A'; Scope = 'ExpireAfter'; Outcome = 'Applied'; Detail = 'Major=100' })
-                $script:sample.Add([PSCustomObject]@{ Site = 'https://x/sites/B'; Scope = 'ExpireAfter'; Outcome = 'Skipped'; Detail = 'No drift' })
-                $script:sample.Add([PSCustomObject]@{ Site = 'https://x/sites/<C&D>'; Scope = 'Legacy'; Outcome = 'Failed'; Detail = 'boom "q" <t>' })
+                $script:sample.Add([PSCustomObject]@{ Site = 'https://x/sites/A'; Scope = 'Legacy'; Library = 'Documents'; Outcome = 'Applied'; Major = '100'; Minor = '0'; ExpireAfterDays = ''; Detail = 'Set Major=100' })
+                $script:sample.Add([PSCustomObject]@{ Site = 'https://x/sites/B'; Scope = 'ExpireAfter'; Library = ''; Outcome = 'WouldApply'; Major = '100'; Minor = ''; ExpireAfterDays = '365'; Detail = 'DryRun' })
+                $script:sample.Add([PSCustomObject]@{ Site = 'https://x/sites/<C&D>'; Scope = 'Legacy'; Library = 'Lib<x>'; Outcome = 'Failed'; Major = '50'; Minor = '0'; ExpireAfterDays = ''; Detail = 'boom "q" <t>' })
             }
 
             It 'Produces a self-contained HTML document' {
                 $html = Export-SPSCleanVersionsReport -Results $script:sample -Version '3.1.0'
                 $html | Should -Match '<!DOCTYPE html>'
                 $html | Should -Match 'Sites processed'
+            }
+
+            It 'Includes the Library, Major, Minor and ExpireAfterDays columns' {
+                $html = Export-SPSCleanVersionsReport -Results $script:sample -Version '3.1.0'
+                $html | Should -Match '<th>Library</th>'
+                $html | Should -Match '<th>Major</th>'
+                $html | Should -Match '<th>Minor</th>'
+                $html | Should -Match '<th>ExpireAfterDays</th>'
+                # A per-library value and an ExpireAfterDays value are rendered.
+                $html | Should -Match '>Documents<'
+                $html | Should -Match '>365<'
             }
 
             It 'Uses the house-style sticky brand banner and centered layout' {

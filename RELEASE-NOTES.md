@@ -5,6 +5,11 @@
 ### Added
 
 - SPSCleanVersions.ps1
+  - **Full reporting**: the HTML report gains **Library / Major / Minor / ExpireAfterDays**
+    columns; Legacy mode reports one row per document library with its real outcome; site
+    version policy modes can list in-scope libraries via an optional `EnumerateLibraries`
+    flag (informative `InScope` rows); and a machine-readable **`results.json`** is written
+    next to the HTML report.
   - **Multi-threading (local only)** via a new `Threads` config property (default `1`).
     `Threads > 1` splits the site list across that many child `pwsh` processes sharing the
     single interactive sign-in through a secured, auto-refreshed token file; workers' results

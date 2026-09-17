@@ -254,6 +254,9 @@ if ($SiteScope -eq 'All' -and $VersionPolicyMode -eq 'Legacy') {
 # Reporting / logging properties.
 [bool]$EnableReport      = if ($config.PSObject.Properties['EnableReport'])     { $config.EnableReport }     else { $true }
 [int]$LogRetentionDays   = if ($config.PSObject.Properties['LogRetentionDays']) { $config.LogRetentionDays } else { 180 }
+# Optional: enumerate document libraries "in scope" for the site version policy modes (adds
+# a Get-PnPList per site — informative only, no per-library outcome). Off by default.
+[bool]$EnumerateLibraries = if ($config.PSObject.Properties['EnumerateLibraries']) { $config.EnumerateLibraries } else { $false }
 
 # Multi-threading (local only). Threads > 1 splits the site list across that many child
 # pwsh processes, all sharing a single delegated sign-in via a secured token file. Default
@@ -574,13 +577,21 @@ function Add-RunResult {
         [Parameter(Mandatory = $true)] [string] $SiteUrl,
         [Parameter(Mandatory = $true)] [string] $Scope,
         [Parameter(Mandatory = $true)] [string] $Outcome,
-        [Parameter()] [string] $Detail = ''
+        [Parameter()] [string] $Detail = '',
+        [Parameter()] [string] $Library = '',
+        [Parameter()] [string] $Major = '',
+        [Parameter()] [string] $Minor = '',
+        [Parameter()] [string] $ExpireAfterDays = ''
     )
     $script:RunResults.Add([PSCustomObject][ordered]@{
-            Site    = $SiteUrl
-            Scope   = $Scope
-            Outcome = $Outcome
-            Detail  = $Detail
+            Site            = $SiteUrl
+            Scope           = $Scope
+            Library         = $Library
+            Outcome         = $Outcome
+            Major           = $Major
+            Minor           = $Minor
+            ExpireAfterDays = $ExpireAfterDays
+            Detail          = $Detail
         })
 }
 
@@ -611,6 +622,7 @@ function Export-SPSCleanVersionsReport {
 
     $rows = @($Results)
     $total = $rows.Count
+    $distinctSites = @($rows | Where-Object { $_.Site } | Select-Object -ExpandProperty Site -Unique).Count
     $applied = @($rows | Where-Object { $_.Outcome -eq 'Applied' }).Count
     $wouldApply = @($rows | Where-Object { $_.Outcome -eq 'WouldApply' }).Count
     $skipped = @($rows | Where-Object { $_.Outcome -eq 'Skipped' -or $_.Outcome -eq 'Compliant' }).Count
@@ -654,6 +666,7 @@ tr.row-alert td{background:#fff5f5}
 .badge.WouldApply{background:#6f42c1}
 .badge.Skipped,.badge.Compliant{background:#9aa4ad}
 .badge.Failed{background:#c0392b}
+.badge.InScope{background:#0a7d8c}
 footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
 '@
 
@@ -663,7 +676,11 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
         $rowClass = if ($r.Outcome -eq 'Failed') { ' class="row-alert"' } else { '' }
         [void]$sb.Append("<tr$rowClass><td>" + (ConvertTo-SPSHtmlEncoded ([string]$r.Site)) + '</td>')
         [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Scope)) + '</td>')
+        [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Library)) + '</td>')
         [void]$sb.Append('<td><span class="badge ' + $oc + '">' + $oc + '</span></td>')
+        [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Major)) + '</td>')
+        [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Minor)) + '</td>')
+        [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.ExpireAfterDays)) + '</td>')
         [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Detail)) + '</td></tr>')
     }
 
@@ -678,7 +695,8 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
 </header>
 <div class="layout">
   <div class="cards">
-    <div class="card"><div class="card-value">$total</div><div class="card-label">Sites processed</div></div>
+    <div class="card"><div class="card-value">$distinctSites</div><div class="card-label">Sites processed</div></div>
+    <div class="card"><div class="card-value">$total</div><div class="card-label">Results (rows)</div></div>
     <div class="card"><div class="card-value">$appliedValue</div><div class="card-label">$appliedLabel</div></div>
     <div class="card"><div class="card-value">$skipped</div><div class="card-label">Skipped / compliant</div></div>
     <div class="$failedCardClass"><div class="card-value">$failed</div><div class="card-label">Failed</div></div>
@@ -687,7 +705,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
     <h2>Per-site results</h2>
     <input id="spsSearch" class="search" type="search" placeholder="Filter rows...">
     <div class="table-wrap">
-      <table><thead><tr><th>Site</th><th>Scope</th><th>Outcome</th><th>Detail</th></tr></thead><tbody id="spsBody">
+      <table><thead><tr><th>Site</th><th>Scope</th><th>Library</th><th>Outcome</th><th>Major</th><th>Minor</th><th>ExpireAfterDays</th><th>Detail</th></tr></thead><tbody id="spsBody">
 $($sb.ToString())
       </tbody></table>
     </div>
@@ -731,6 +749,7 @@ if (-not $script:IsAzureAutomationRun) {
     }
     Clear-OldRunFiles -Path $script:LogsFolder -Retention $LogRetentionDays -Filter '*.log'
     Clear-OldRunFiles -Path $script:ResultsFolder -Retention $LogRetentionDays -Filter '*.html'
+    Clear-OldRunFiles -Path $script:ResultsFolder -Retention $LogRetentionDays -Filter '*.json'
     try {
         $transcriptPath = Join-Path -Path $script:LogsFolder -ChildPath ("SPSCleanVersions-$($script:RunTimestamp).log")
         Start-Transcript -Path $transcriptPath -IncludeInvocationHeader -WhatIf:$false | Out-Null
@@ -1073,7 +1092,9 @@ if ($Threads -gt 1 -and -not $script:IsAzureAutomationRun -and -not $IsWorker -a
                     try {
                         $rows = Get-Content -Path $w.ResultsFile -Raw | ConvertFrom-Json
                         foreach ($row in @($rows)) {
-                            Add-RunResult -SiteUrl ([string]$row.Site) -Scope ([string]$row.Scope) -Outcome ([string]$row.Outcome) -Detail ([string]$row.Detail)
+                            Add-RunResult -SiteUrl ([string]$row.Site) -Scope ([string]$row.Scope) -Outcome ([string]$row.Outcome) `
+                                -Detail ([string]$row.Detail) -Library ([string]$row.Library) `
+                                -Major ([string]$row.Major) -Minor ([string]$row.Minor) -ExpireAfterDays ([string]$row.ExpireAfterDays)
                             $null = $reportedSites.Add([string]$row.Site)
                         }
                     }
@@ -1168,7 +1189,7 @@ foreach ($SiteUrl in $(if ($script:RunAsOrchestrator) { @() } else { $SiteUrls }
                 $_.RootFolder.ServerRelativeUrl -notlike "*/Style Library*" -and
                 $_.BaseTemplate -eq 101 # Document Libraries only
             }
-            $legacyApplied = 0; $legacyCompliant = 0; $legacyFailed = 0
+            $legacyApplied = 0; $legacyCompliant = 0; $legacyFailed = 0; $legacyWouldApply = 0
             foreach ($list in $targetLists) {
                 $minorDesired = ($KeepMinorVersions -gt 0)
                 $changeNeeded = ($list.MajorVersionLimit -ne $KeepMajorVersions) -or
@@ -1176,39 +1197,58 @@ foreach ($SiteUrl in $(if ($script:RunAsOrchestrator) { @() } else { $SiteUrls }
                 ($minorDesired -and ($list.MajorWithMinorVersionsLimit -ne $KeepMinorVersions)) -or
                 (-not $minorDesired -and ($list.MajorWithMinorVersionsLimit -ne 0))
 
-                if ($changeNeeded) {
-                    if ($PSCmdlet.ShouldProcess($list.Title, "Set versioning policy")) {
-                        $p = @{
-                            Identity         = "$($list.Title)"
-                            EnableVersioning = $true
-                            MajorVersions    = $KeepMajorVersions
-                        }
-                        if ($minorDesired) {
-                            $p.EnableMinorVersions = $true
-                            $p.MinorVersions = $KeepMinorVersions
-                        }
-                        else {
-                            $p.EnableMinorVersions = $false
-                        }
-                        try {
-                            Invoke-RetryCommand -OperationName "Set-PnPList ($($list.Title))" -ScriptBlock { Set-PnPList @p -ErrorAction Stop }
-                            Write-Output "`t$($list.Title) -> Major=$KeepMajorVersions; MinorEnabled=$minorDesired; MinorLimit=$KeepMinorVersions"
-                            $legacyApplied++
-                        }
-                        catch {
-                            Write-Warning "`tFAILED $($list.Title): $($_.Exception.Message)"
-                            $legacyFailed++
-                        }
-                    }
-                }
-                else {
+                $minorReported = if ($minorDesired) { "$KeepMinorVersions" } else { '0' }
+                if (-not $changeNeeded) {
                     Write-Output "`t$($list.Title) already compliant"
                     $legacyCompliant++
+                    Add-RunResult -SiteUrl $SiteUrl -Scope 'Legacy' -Library $list.Title -Outcome 'Compliant' `
+                        -Major "$KeepMajorVersions" -Minor $minorReported -Detail 'Already compliant'
+                }
+                elseif ($WhatIfPreference) {
+                    Write-Output "`t$($list.Title) -> would set Major=$KeepMajorVersions; MinorEnabled=$minorDesired; MinorLimit=$KeepMinorVersions (DryRun)"
+                    $legacyWouldApply++
+                    Add-RunResult -SiteUrl $SiteUrl -Scope 'Legacy' -Library $list.Title -Outcome 'WouldApply' `
+                        -Major "$KeepMajorVersions" -Minor $minorReported `
+                        -Detail "DryRun: was Major=$($list.MajorVersionLimit); would set Major=$KeepMajorVersions, Minor=$minorReported"
+                }
+                else {
+                    $p = @{
+                        Identity         = "$($list.Title)"
+                        EnableVersioning = $true
+                        MajorVersions    = $KeepMajorVersions
+                    }
+                    if ($minorDesired) {
+                        $p.EnableMinorVersions = $true
+                        $p.MinorVersions = $KeepMinorVersions
+                    }
+                    else {
+                        $p.EnableMinorVersions = $false
+                    }
+                    # Keep the ShouldProcess gate so -Confirm is honoured per library. DryRun is
+                    # handled above via $WhatIfPreference; here we only reach the real mutation.
+                    if (-not $PSCmdlet.ShouldProcess($list.Title, 'Set versioning policy')) {
+                        Write-Output "`t$($list.Title) -> change declined (not confirmed); skipped."
+                        Add-RunResult -SiteUrl $SiteUrl -Scope 'Legacy' -Library $list.Title -Outcome 'Skipped' `
+                            -Major "$KeepMajorVersions" -Minor $minorReported -Detail 'Change declined at confirmation prompt.'
+                        continue
+                    }
+                    try {
+                        Invoke-RetryCommand -OperationName "Set-PnPList ($($list.Title))" -ScriptBlock { Set-PnPList @p -ErrorAction Stop }
+                        Write-Output "`t$($list.Title) -> Major=$KeepMajorVersions; MinorEnabled=$minorDesired; MinorLimit=$KeepMinorVersions"
+                        $legacyApplied++
+                        Add-RunResult -SiteUrl $SiteUrl -Scope 'Legacy' -Library $list.Title -Outcome 'Applied' `
+                            -Major "$KeepMajorVersions" -Minor $minorReported -Detail "Set Major=$KeepMajorVersions, Minor=$minorReported"
+                    }
+                    catch {
+                        Write-Warning "`tFAILED $($list.Title): $($_.Exception.Message)"
+                        $legacyFailed++
+                        Add-RunResult -SiteUrl $SiteUrl -Scope 'Legacy' -Library $list.Title -Outcome 'Failed' `
+                            -Major "$KeepMajorVersions" -Minor $minorReported -Detail $_.Exception.Message
+                    }
                 }
             }
-            $legacyOutcome = if ($legacyFailed -gt 0) { 'Failed' } elseif ($legacyApplied -gt 0) { 'Applied' } else { 'Compliant' }
-            Add-RunResult -SiteUrl $SiteUrl -Scope "Legacy (Major=$KeepMajorVersions,Minor=$KeepMinorVersions)" -Outcome $legacyOutcome `
-                -Detail "$legacyApplied applied, $legacyCompliant compliant, $legacyFailed failed across $(@($targetLists).Count) libraries"
+            $appliedWord = if ($WhatIfPreference) { "$legacyWouldApply would apply" } else { "$legacyApplied applied" }
+            Write-Output "`tLegacy summary for ${SiteUrl}: $appliedWord, $legacyCompliant compliant, $legacyFailed failed across $(@($targetLists).Count) library(ies)."
         }
         else {
             # --- Site version policy mode: Set-PnPSiteVersionPolicy at the site level ---
@@ -1230,9 +1270,11 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
             }
 
             Write-Output "Checking site version policy on $SiteUrl (Mode=$VersionPolicyMode)..."
+            $expireReported = if ($VersionPolicyMode -eq 'NoExpiration') { '0' } elseif ($VersionPolicyMode -eq 'ExpireAfter') { "$ExpireVersionsAfterDays" } else { '' }
             if ($effectiveApplyTo -eq 'None') {
                 Write-Output "`tApp-only cannot target existing libraries; nothing to apply here. Skipped."
                 Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'Skipped' `
+                    -Major "$KeepMajorVersions" -ExpireAfterDays $expireReported `
                     -Detail 'App-only: existing document libraries require a delegated context; run locally/interactively.'
             }
             else {
@@ -1249,7 +1291,8 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
                                 -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
                                 -ExpireAfterDays $ExpireVersionsAfterDays -ApplyTo $effectiveApplyTo
                             Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Outcome 'WouldApply' `
-                                -Detail "DryRun: would set Major=$KeepMajorVersions; ExpireAfterDays=$ExpireVersionsAfterDays$existingNote"
+                                -Major "$KeepMajorVersions" -ExpireAfterDays $expireReported `
+                                -Detail "DryRun: would set Major=$KeepMajorVersions; ExpireAfterDays=$expireReported$existingNote"
                         }
                         else {
                             Write-Output "`tDrift detected. Applying site version policy...$existingNote"
@@ -1257,17 +1300,42 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
                                 -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
                                 -ExpireAfterDays $ExpireVersionsAfterDays -ApplyTo $effectiveApplyTo
                             Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Outcome 'Applied' `
-                                -Detail "Major=$KeepMajorVersions; ExpireAfterDays=$ExpireVersionsAfterDays$existingNote"
+                                -Major "$KeepMajorVersions" -ExpireAfterDays $expireReported `
+                                -Detail "Major=$KeepMajorVersions; ExpireAfterDays=$expireReported$existingNote"
                         }
                     }
                     else {
                         Write-Output "`tNo drift. Site version policy already compliant; skipped."
-                        Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Outcome 'Skipped' -Detail 'No drift; already compliant'
+                        Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Outcome 'Skipped' `
+                            -Major "$KeepMajorVersions" -ExpireAfterDays $expireReported -Detail 'No drift; already compliant'
+                    }
+
+                    # Optional informative enumeration of the document libraries in scope. The
+                    # site version policy applies to existing libraries via an ASYNCHRONOUS
+                    # server job, so there is no per-library Applied/Failed outcome here — these
+                    # rows list what is in scope (Outcome = InScope). Off by default because it
+                    # adds a Get-PnPList call per site, which is costly at tenant scale. Only
+                    # meaningful when the EFFECTIVE target includes existing libraries (skip it
+                    # for a New-only target, e.g. an app-only Both->New downgrade).
+                    if ($EnumerateLibraries -and ($effectiveApplyTo -eq 'Both' -or $effectiveApplyTo -eq 'Existing')) {
+                        try {
+                            $libs = Invoke-RetryCommand -OperationName 'Get-PnPList (enumerate)' -ScriptBlock { Get-PnPList -ErrorAction Stop }
+                            $docLibs = @($libs | Where-Object { $_.BaseTemplate -eq 101 -and -not $_.Hidden })
+                            foreach ($lib in $docLibs) {
+                                Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Library $lib.Title -Outcome 'InScope' `
+                                    -Major "$KeepMajorVersions" -ExpireAfterDays $expireReported `
+                                    -Detail 'Document library in scope; site version policy applies via an async server job (no per-library status).'
+                            }
+                        }
+                        catch {
+                            Write-Warning "`tCould not enumerate libraries on ${SiteUrl}: $($_.Exception.Message)"
+                        }
                     }
                 }
                 catch {
                     Write-Warning "`tFAILED to apply site version policy on ${SiteUrl}: $($_.Exception.Message)"
-                    Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Outcome 'Failed' -Detail $_.Exception.Message
+                    Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Outcome 'Failed' `
+                        -Major "$KeepMajorVersions" -ExpireAfterDays $expireReported -Detail $_.Exception.Message
                 }
             }
         }
@@ -1313,8 +1381,10 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
 # as JSON, which the orchestrator merges and renders into the single consolidated report.
 if ($IsWorker) {
     try {
-        $payload = @($script:RunResults) | ConvertTo-Json -Depth 6
-        if ([string]::IsNullOrWhiteSpace($payload)) { $payload = '[]' }
+        # NOTE: pipe the List's .ToArray() to ConvertTo-Json — piping @($List[object]) directly
+        # fails with "Argument types do not match" on recent PowerShell.
+        $rowsArray = $script:RunResults.ToArray()
+        $payload = if ($rowsArray.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $rowsArray -Depth 6 }
         Set-Content -Path $WorkerResultsFile -Value $payload -Encoding UTF8 -Force -WhatIf:$false
     }
     catch {
@@ -1338,13 +1408,33 @@ if ($EnableReport -and -not $script:IsAzureAutomationRun -and $script:RunResults
     }
 }
 
-# Run summary line.
+# Emit a machine-readable JSON of the results next to the HTML, for auditing, re-processing
+# (Excel/Power BI) or diffing. Written for any local run with EnableReport (independently of
+# the HTML report's non-empty gate, so an empty run still produces a valid [] file).
+if ($EnableReport -and -not $script:IsAzureAutomationRun -and -not $IsWorker) {
+    try {
+        $jsonPath = Join-Path -Path $script:ResultsFolder -ChildPath ("SPSCleanVersions-$($script:RunTimestamp).json")
+        # Use .ToArray() rather than @($List) | ConvertTo-Json (which throws "Argument types
+        # do not match" on recent PowerShell).
+        $jsonRows = $script:RunResults.ToArray()
+        $jsonPayload = if ($jsonRows.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $jsonRows -Depth 6 }
+        Set-Content -Path $jsonPath -Value $jsonPayload -Encoding UTF8 -Force -WhatIf:$false
+        Write-Output "JSON results written to: $jsonPath"
+    }
+    catch {
+        Write-Warning "Unable to write JSON results: $($_.Exception.Message)"
+    }
+}
+
+# Run summary line. Results are now per-library (Legacy) or per-site/in-scope (site policy),
+# so report both the distinct site count and the row count for clarity.
 $sumApplied = @($script:RunResults | Where-Object { $_.Outcome -eq 'Applied' }).Count
 $sumWouldApply = @($script:RunResults | Where-Object { $_.Outcome -eq 'WouldApply' }).Count
 $sumSkipped = @($script:RunResults | Where-Object { $_.Outcome -eq 'Skipped' -or $_.Outcome -eq 'Compliant' }).Count
 $sumFailed = @($script:RunResults | Where-Object { $_.Outcome -eq 'Failed' }).Count
+$distinctSites = @($script:RunResults | Select-Object -ExpandProperty Site -Unique).Count
 $appliedPart = if ($WhatIfPreference) { "$sumWouldApply would apply" } else { "$sumApplied applied" }
-Write-Output "--- SPSCleanVersions finished: $($script:RunResults.Count) site(s) — $appliedPart, $sumSkipped skipped/compliant, $sumFailed failed ---"
+Write-Output "--- SPSCleanVersions finished: $distinctSites site(s), $($script:RunResults.Count) result(s) — $appliedPart, $sumSkipped skipped/compliant, $sumFailed failed ---"
 
 if ($script:TranscriptStarted) {
     try { Stop-Transcript -WhatIf:$false | Out-Null } catch { }
