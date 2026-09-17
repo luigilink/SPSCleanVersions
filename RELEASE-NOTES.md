@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- SPSCleanVersions.ps1
+  - **Throttling-aware retry** (`Invoke-RetryCommand` + `Get-RetryAfterDelay` +
+    `Test-IsAuthError`) around the SharePoint calls: HTTP 429/503 responses honour the
+    server `Retry-After` hint (capped at 300s), otherwise exponential backoff. Adapted (MIT)
+    from the SPO Storage Assessment toolkit.
+
 ### Changed
 
 - SPSCleanVersions.ps1

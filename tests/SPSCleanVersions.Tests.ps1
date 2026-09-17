@@ -502,8 +502,11 @@ Describe 'SPSCleanVersions Script' {
             # omitted for a new-libraries-only request.
             $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
             $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
-            $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-SiteVersionPolicy' }, $true) | Select-Object -First 1
-            . ([ScriptBlock]::Create($fn.Extent.Text))
+            # Set-SiteVersionPolicy now calls Invoke-RetryCommand (which uses Get-RetryAfterDelay
+            # and Test-IsAuthError), so dot-source those helpers too or the call would fail.
+            $wanted = 'Set-SiteVersionPolicy', 'Invoke-RetryCommand', 'Get-RetryAfterDelay', 'Test-IsAuthError'
+            $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
+            foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
 
             # Local stub so Set-PnPSiteVersionPolicy is mockable without importing
             # PnP.PowerShell. Its parameters mirror what the script splats, so the mock's
@@ -813,6 +816,103 @@ Describe 'SPSCleanVersions Script' {
                 $html = Export-SPSCleanVersionsReport -Results $script:sample -Version '3.1.0'
                 $html | Should -Match 'ATTENTION'
             }
+        }
+    }
+
+    Context 'Throttling / retry helpers (functional)' {
+
+        BeforeAll {
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            $wanted = 'Invoke-RetryCommand', 'Get-RetryAfterDelay', 'Test-IsAuthError'
+            $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
+            foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
+        }
+
+        It 'Defines the three throttling helpers' {
+            $scriptContent | Should -Match 'function\s+Get-RetryAfterDelay'
+            $scriptContent | Should -Match 'function\s+Test-IsAuthError'
+            $scriptContent | Should -Match 'function\s+Invoke-RetryCommand'
+        }
+
+        It 'Wraps the SharePoint calls with Invoke-RetryCommand' {
+            $scriptContent | Should -Match "Invoke-RetryCommand -OperationName 'Get-PnPSiteVersionPolicy'"
+            $scriptContent | Should -Match 'Invoke-RetryCommand -OperationName "Set-PnPSiteVersionPolicy'
+            $scriptContent | Should -Match "Invoke-RetryCommand -OperationName 'Get-PnPTenantSite'"
+            $scriptContent | Should -Match "Invoke-RetryCommand -OperationName 'Get-PnPList'"
+            $scriptContent | Should -Match 'Invoke-RetryCommand -OperationName "Set-PnPList'
+            $scriptContent | Should -Match "Invoke-RetryCommand -OperationName 'New-PnPSiteFileVersionBatchDeleteJob'"
+        }
+
+        It 'Invoke-RetryCommand returns the script block result without retrying on success' {
+            $script:calls = 0
+            $result = Invoke-RetryCommand -OperationName 'ok' -ScriptBlock { $script:calls++; 'value' }
+            $result | Should -Be 'value'
+            $script:calls | Should -Be 1
+        }
+
+        It 'Invoke-RetryCommand retries then succeeds' {
+            $script:calls = 0
+            $result = Invoke-RetryCommand -OperationName 'transient' -BaseDelaySeconds 1 -MaxRetries 3 -ScriptBlock {
+                $script:calls++
+                if ($script:calls -lt 2) { throw 'transient failure' }
+                'ok'
+            }
+            $result | Should -Be 'ok'
+            $script:calls | Should -Be 2
+        }
+
+        It 'Invoke-RetryCommand rethrows after exhausting retries' {
+            $script:calls = 0
+            { Invoke-RetryCommand -OperationName 'always' -BaseDelaySeconds 1 -MaxRetries 2 -ScriptBlock {
+                    $script:calls++; throw 'boom'
+                } } | Should -Throw
+            $script:calls | Should -Be 3
+        }
+
+        It 'Invoke-RetryCommand honours a Retry-After hint (capped) instead of backoff' {
+            # Mock Start-Sleep so the test is fast and we can assert the delay used. The first
+            # attempt throws a throttling error carrying "Retry-After: 120"; the retry must
+            # sleep for that server-provided value (120s), not the exponential backoff.
+            $script:sleptFor = $null
+            Mock -CommandName Start-Sleep -MockWith { param($Seconds) $script:sleptFor = $Seconds }
+            $script:calls = 0
+            $result = Invoke-RetryCommand -OperationName 'throttled' -BaseDelaySeconds 5 -MaxRetries 3 -ScriptBlock {
+                $script:calls++
+                if ($script:calls -lt 2) { throw 'Request was throttled. Retry-After: 120' }
+                'ok'
+            }
+            $result | Should -Be 'ok'
+            $script:sleptFor | Should -Be 120
+        }
+
+        It 'Invoke-RetryCommand caps a very large Retry-After at 300s' {
+            $script:sleptFor = $null
+            Mock -CommandName Start-Sleep -MockWith { param($Seconds) $script:sleptFor = $Seconds }
+            $script:calls = 0
+            $null = Invoke-RetryCommand -OperationName 'throttled-big' -BaseDelaySeconds 5 -MaxRetries 3 -ScriptBlock {
+                $script:calls++
+                if ($script:calls -lt 2) { throw 'Throttled. Retry-After: 999' }
+                'ok'
+            }
+            $script:sleptFor | Should -Be 300
+        }
+
+        It 'Get-RetryAfterDelay reads a Retry-After hint from the message' {
+            $err = try { throw 'Request throttled. Retry-After: 42' } catch { $_ }
+            Get-RetryAfterDelay -ErrorRecord $err | Should -Be 42
+        }
+
+        It 'Get-RetryAfterDelay returns 0 when no hint is present' {
+            $err = try { throw 'some unrelated error' } catch { $_ }
+            Get-RetryAfterDelay -ErrorRecord $err | Should -Be 0
+        }
+
+        It 'Test-IsAuthError detects auth failures and ignores others' {
+            $auth = try { throw 'AADSTS700082 token is expired' } catch { $_ }
+            $other = try { throw 'file not found' } catch { $_ }
+            Test-IsAuthError -ErrorRecord $auth | Should -BeTrue
+            Test-IsAuthError -ErrorRecord $other | Should -BeFalse
         }
     }
 

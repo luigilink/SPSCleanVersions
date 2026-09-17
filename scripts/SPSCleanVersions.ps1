@@ -293,6 +293,116 @@ function Test-IsAzureAutomation {
     )
 }
 
+#region --- Throttling / retry helpers ---
+# Adapted from luigilink/Philippe Entringer's SPO Storage Assessment toolkit
+# (Get-RetryAfterDelay / Test-IsAuthError / Invoke-RetryCommand), MIT-licensed.
+# SharePoint Online throttles aggressive callers (HTTP 429/503) with a Retry-After hint;
+# at tenant scale (thousands of sites) honouring it is essential to avoid being blocked.
+
+function Get-RetryAfterDelay {
+    <#
+        .SYNOPSIS
+        Extracts a Retry-After delay (in seconds) from a throttling error, or 0 if none.
+
+        .DESCRIPTION
+        SharePoint Online throttling responses (HTTP 429/503) carry a Retry-After header.
+        Depending on the failure it may surface on the exception's HttpResponseMessage
+        (Headers.RetryAfter) or be embedded in the exception message. This checks both and
+        returns 0 when no hint is found so the caller can fall back to exponential backoff.
+    #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param (
+        [Parameter(Mandatory = $true)] [System.Management.Automation.ErrorRecord] $ErrorRecord
+    )
+
+    $ex = $ErrorRecord.Exception
+    try {
+        $response = if ($ex.PSObject.Properties['Response']) { $ex.Response } else { $null }
+        $header = if ($response -and $response.PSObject.Properties['Headers']) { $response.Headers } else { $null }
+        $ra = if ($header -and $header.PSObject.Properties['RetryAfter']) { $header.RetryAfter } else { $null }
+        if ($ra) {
+            if ($ra.Delta -and $ra.Delta.TotalSeconds -gt 0) {
+                return [int][math]::Ceiling($ra.Delta.TotalSeconds)
+            }
+            if ($ra.Date) {
+                $seconds = ([datetimeoffset]$ra.Date - [datetimeoffset]::UtcNow).TotalSeconds
+                if ($seconds -gt 0) { return [int][math]::Ceiling($seconds) }
+            }
+        }
+    }
+    catch {
+        Write-Verbose "No structured Retry-After header found: $($_.Exception.Message)"
+    }
+
+    if ($ex.Message -match 'Retry-After[:\s]+(\d+)') {
+        return [int]$Matches[1]
+    }
+    return 0
+}
+
+function Test-IsAuthError {
+    <#
+        .SYNOPSIS
+        Returns $true when an error looks like an authentication / token-expiry failure.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory = $true)] [System.Management.Automation.ErrorRecord] $ErrorRecord
+    )
+    $message = [string]$ErrorRecord.Exception.Message
+    return [bool]($message -match '(?i)(\b401\b|unauthorized|invalid.?authentication|token (is )?expired|expired token|access token|AADSTS\d+|InvalidAuthenticationToken)')
+}
+
+function Invoke-RetryCommand {
+    <#
+        .SYNOPSIS
+        Runs a script block with Retry-After-aware, exponential-backoff retry on failure.
+
+        .DESCRIPTION
+        Executes the supplied script block and, if it throws, retries. When the caught
+        exception carries a Retry-After hint (HTTP 429/503 throttling from SharePoint
+        Online) that server-provided delay is honoured (capped at 300s); otherwise it falls
+        back to exponential backoff (BaseDelaySeconds * 2^attempt). Defence-in-depth on top
+        of PnP.PowerShell's own retry, important for tenant-scale runs.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [scriptblock] $ScriptBlock,
+        [ValidateRange(0, 20)] [int] $MaxRetries = 5,
+        [ValidateRange(1, 300)] [int] $BaseDelaySeconds = 5,
+        [string] $OperationName = 'operation'
+    )
+
+    $attempt = 0
+    do {
+        try {
+            return & $ScriptBlock
+        }
+        catch {
+            if ($attempt -ge $MaxRetries) { throw }
+            $attempt++
+
+            if (Test-IsAuthError -ErrorRecord $_) {
+                Write-Warning "[$OperationName] attempt $attempt/$MaxRetries hit an authentication/token error: $($_.Exception.Message). Retrying; if this persists, check the ClientId / app registration."
+            }
+
+            $retryAfter = Get-RetryAfterDelay -ErrorRecord $_
+            if ($retryAfter -gt 0) {
+                $delay = [math]::Min($retryAfter, 300)
+                Write-Warning "[$OperationName] attempt $attempt/$MaxRetries throttled: $($_.Exception.Message). Honouring Retry-After: ${delay}s."
+            }
+            else {
+                $delay = [math]::Pow(2, $attempt) * $BaseDelaySeconds
+                Write-Warning "[$OperationName] attempt $attempt/$MaxRetries failed: $($_.Exception.Message). Retrying in ${delay}s."
+            }
+            Start-Sleep -Seconds $delay
+        }
+    } while ($attempt -le $MaxRetries)
+}
+#endregion
+
 #region --- Reporting helpers ---
 # Per-site result records collected during the run and rendered into the report.
 $script:RunResults = New-Object System.Collections.Generic.List[object]
@@ -495,7 +605,7 @@ function Test-SiteVersionPolicyDrift {
     )
 
     try {
-        $current = Get-PnPSiteVersionPolicy -ErrorAction Stop
+        $current = Invoke-RetryCommand -OperationName 'Get-PnPSiteVersionPolicy' -ScriptBlock { Get-PnPSiteVersionPolicy -ErrorAction Stop }
     }
     catch {
         Write-Verbose "Test-SiteVersionPolicyDrift: unable to read current policy ($($_.Exception.Message)); treating as drift."
@@ -605,7 +715,7 @@ function Set-SiteVersionPolicy {
     }
 
     if ($PSCmdlet.ShouldProcess($SiteUrl, "Set site version policy ($Mode, ApplyTo=$ApplyTo)")) {
-        Set-PnPSiteVersionPolicy @params -ErrorAction Stop
+        Invoke-RetryCommand -OperationName "Set-PnPSiteVersionPolicy ($Mode)" -ScriptBlock { Set-PnPSiteVersionPolicy @params -ErrorAction Stop }
         Write-Output "`tSite version policy applied: Mode=$Mode; ApplyTo=$ApplyTo"
     }
 }
@@ -673,7 +783,7 @@ function Get-TenantSiteUrls {
     try {
         $getParams = @{ ErrorAction = 'Stop' }
         if (-not [string]::IsNullOrWhiteSpace($Filter)) { $getParams['Filter'] = $Filter }
-        $sites = Get-PnPTenantSite @getParams
+        $sites = Invoke-RetryCommand -OperationName 'Get-PnPTenantSite' -ScriptBlock { Get-PnPTenantSite @getParams }
         $urls = @($sites | Where-Object { $null -ne $_.Url } | Select-Object -ExpandProperty Url)
         Write-Verbose "Discovered $($urls.Count) site collection(s) from the tenant."
         return , [string[]]$urls
@@ -764,7 +874,7 @@ foreach ($SiteUrl in $SiteUrls) {
             # --- Legacy mode: per-library count-based limits via Set-PnPList ---
             # Get all Lists in the Site
             Write-Output "Retrieving lists from $SiteUrl..."
-            $allLists = Get-PnPList
+            $allLists = Invoke-RetryCommand -OperationName 'Get-PnPList' -ScriptBlock { Get-PnPList -ErrorAction Stop }
             $targetLists = $allLists | Where-Object {
                 $_.Hidden -eq $false -and
                 $_.EnableVersioning -eq $true -and
@@ -797,7 +907,7 @@ foreach ($SiteUrl in $SiteUrls) {
                             $p.EnableMinorVersions = $false
                         }
                         try {
-                            Set-PnPList @p -ErrorAction Stop
+                            Invoke-RetryCommand -OperationName "Set-PnPList ($($list.Title))" -ScriptBlock { Set-PnPList @p -ErrorAction Stop }
                             Write-Output "`t$($list.Title) -> Major=$KeepMajorVersions; MinorEnabled=$minorDesired; MinorLimit=$KeepMinorVersions"
                             $legacyApplied++
                         }
@@ -895,7 +1005,7 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                             MajorVersionLimit           = $KeepMajorVersions
                             MajorWithMinorVersionsLimit = $KeepMinorVersions
                         }
-                        New-PnPSiteFileVersionBatchDeleteJob @batchParams -Force -ErrorAction Stop
+                        Invoke-RetryCommand -OperationName 'New-PnPSiteFileVersionBatchDeleteJob' -ScriptBlock { New-PnPSiteFileVersionBatchDeleteJob @batchParams -Force -ErrorAction Stop }
                         Write-Output "`tBatch delete job submitted successfully for $SiteUrl"
                     }
                     catch {
