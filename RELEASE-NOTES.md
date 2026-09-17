@@ -22,6 +22,12 @@
 ### Fixed
 
 - SPSCleanVersions.ps1
+  - **Local DryRun now writes the HTML report and transcript.** `DryRun` sets
+    `$WhatIfPreference` globally, which previously also suppressed the tool's own local
+    artifact writes (folder creation, transcript, HTML report, retention pruning), so a
+    local DryRun produced no report. These local operations now use `-WhatIf:$false`, while
+    SharePoint changes stay simulated. No effect in Azure Automation.
+    ([#39](https://github.com/luigilink/SPSCleanVersions/issues/39))
   - **Site version policy (`ExpireAfter` / `NoExpiration`)** — applying the policy to
     existing document libraries no longer fails when no minor-version count is configured
     (`KeepMinorVersions` absent / `0`). `MajorWithMinorVersions` is now sent (including

@@ -437,7 +437,7 @@ function Clear-OldRunFiles {
     $cutoff = (Get-Date).AddDays(-$Retention)
     Get-ChildItem -Path $Path -Filter $Filter -File -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -le $cutoff } |
-        ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue }
+        ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue -WhatIf:$false }
 }
 #endregion
 
@@ -455,13 +455,13 @@ if (-not $script:IsAzureAutomationRun) {
     $script:LogsFolder = Join-Path -Path $scriptRoot -ChildPath 'Logs'
     $script:ResultsFolder = Join-Path -Path $scriptRoot -ChildPath 'Results'
     foreach ($dir in @($script:LogsFolder, $script:ResultsFolder)) {
-        if (-not (Test-Path -Path $dir)) { $null = New-Item -Path $dir -ItemType Directory -Force }
+        if (-not (Test-Path -Path $dir)) { $null = New-Item -Path $dir -ItemType Directory -Force -WhatIf:$false }
     }
     Clear-OldRunFiles -Path $script:LogsFolder -Retention $LogRetentionDays -Filter '*.log'
     Clear-OldRunFiles -Path $script:ResultsFolder -Retention $LogRetentionDays -Filter '*.html'
     try {
         $transcriptPath = Join-Path -Path $script:LogsFolder -ChildPath ("SPSCleanVersions-$($script:RunTimestamp).log")
-        Start-Transcript -Path $transcriptPath -IncludeInvocationHeader | Out-Null
+        Start-Transcript -Path $transcriptPath -IncludeInvocationHeader -WhatIf:$false | Out-Null
         $script:TranscriptStarted = $true
     }
     catch {
@@ -923,7 +923,7 @@ if ($EnableReport -and -not $script:IsAzureAutomationRun -and $script:RunResults
         -Title 'SPSCleanVersions' -Version $script:ScriptVersion -DryRunMode:$WhatIfPreference
     try {
         $reportPath = Join-Path -Path $script:ResultsFolder -ChildPath ("SPSCleanVersions-$($script:RunTimestamp).html")
-        Set-Content -Path $reportPath -Value $reportHtml -Encoding UTF8 -Force
+        Set-Content -Path $reportPath -Value $reportHtml -Encoding UTF8 -Force -WhatIf:$false
         Write-Output "HTML report written to: $reportPath"
     }
     catch {
@@ -940,6 +940,6 @@ $appliedPart = if ($WhatIfPreference) { "$sumWouldApply would apply" } else { "$
 Write-Output "--- SPSCleanVersions finished: $($script:RunResults.Count) site(s) — $appliedPart, $sumSkipped skipped/compliant, $sumFailed failed ---"
 
 if ($script:TranscriptStarted) {
-    try { Stop-Transcript | Out-Null } catch { }
+    try { Stop-Transcript -WhatIf:$false | Out-Null } catch { }
 }
 #endregion

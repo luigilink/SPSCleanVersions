@@ -716,6 +716,17 @@ Describe 'SPSCleanVersions Script' {
 
     Context 'Logging and HTML report' {
 
+        It 'Should write local artifacts even in DryRun (WhatIf bypass)' {
+            # #39: DryRun sets $WhatIfPreference globally, which also suppressed the tool's own
+            # artifact writes. Folder creation, transcript, HTML report and retention pruning
+            # must use -WhatIf:$false so a local DryRun still produces a report/transcript.
+            $scriptContent | Should -Match 'New-Item -Path \$dir -ItemType Directory -Force -WhatIf:\$false'
+            $scriptContent | Should -Match 'Start-Transcript -Path \$transcriptPath -IncludeInvocationHeader -WhatIf:\$false'
+            $scriptContent | Should -Match 'Set-Content -Path \$reportPath .* -WhatIf:\$false'
+            $scriptContent | Should -Match 'Remove-Item -Path \$_\.FullName -Force -ErrorAction SilentlyContinue -WhatIf:\$false'
+            $scriptContent | Should -Match 'Stop-Transcript -WhatIf:\$false'
+        }
+
         It 'Should define the Export-SPSCleanVersionsReport function' {
             $scriptContent | Should -Match 'function\s+Export-SPSCleanVersionsReport'
         }
