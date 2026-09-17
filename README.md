@@ -7,6 +7,8 @@
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 [![SPSCleanVersions CI Pester Tests](https://github.com/luigilink/SPSCleanVersions/actions/workflows/pester.yml/badge.svg)](https://github.com/luigilink/SPSCleanVersions/actions/workflows/pester.yml)
 [![PowerShell Gallery](https://img.shields.io/powershellgallery/v/SPSCleanVersions.svg?style=flat&label=PSGallery)](https://www.powershellgallery.com/packages/SPSCleanVersions)
+[![PowerShell](https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
+[![PnP.PowerShell](https://img.shields.io/badge/PnP.PowerShell-2.12.0%2B-0078D4)](https://www.powershellgallery.com/packages/PnP.PowerShell)
 
 **SPSCleanVersions** is a PowerShell tool that manages version history across your SharePoint Online tenant to optimize storage costs. It sets per-library major/minor version limits, applies site-level version policies (including expiration) via `Set-PnPSiteVersionPolicy`, and can act on selected sites or the whole tenant — only where a change is actually needed. Compatible with local execution and Azure Automation Runbooks.
 
