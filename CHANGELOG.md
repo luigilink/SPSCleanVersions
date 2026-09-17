@@ -5,6 +5,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- SPSCleanVersions.ps1
+  - **Throttling-aware retry.** Added `Invoke-RetryCommand` (with `Get-RetryAfterDelay` and
+    `Test-IsAuthError`) and wrapped the SharePoint calls (`Get-`/`Set-PnPSiteVersionPolicy`,
+    `Get-PnPTenantSite`, `Get-`/`Set-PnPList`, `New-PnPSiteFileVersionBatchDeleteJob`). On
+    HTTP 429/503 throttling the server `Retry-After` hint is honoured (capped at 300s),
+    otherwise the call falls back to exponential backoff — essential for tenant-scale runs.
+    Adapted (MIT) from the SPO Storage Assessment toolkit.
+
 ### Changed
 
 - SPSCleanVersions.ps1
