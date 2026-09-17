@@ -74,6 +74,9 @@ When `main` is in a state worth publishing, decide the new version `x.y.z`
 ## Notes
 
 - Keep the three version fields on the **same** value as the release tag.
+- The static **PowerShell** and **PnP.PowerShell** badges in `README.md` reflect the
+  script's `#Requires` (`-Version` and the `PnP.PowerShell` module version). Bump them in
+  the same PR whenever those requirements change (this can happen outside a release).
 - Re-pushing a tag re-runs the release workflow, refreshing the release assets and
   re-publishing to the Gallery (subject to Gallery versioning rules — a version already
   published cannot be overwritten, so bump before re-publishing).
