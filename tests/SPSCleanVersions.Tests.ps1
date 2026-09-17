@@ -338,21 +338,23 @@ Describe 'SPSCleanVersions Script' {
         }
     }
 
-    Context 'Local single sign-in (token reuse)' {
+    Context 'Local single sign-in (one prompt, per-site interactive)' {
 
         It 'Should establish a single delegated connection before the site loop' {
             $scriptContent | Should -Match '\$script:DelegatedAuthConnection'
             $scriptContent | Should -Match 'Connect-PnPOnline\s+-Url\s+\$anchorUrl\s+-Interactive\s+-ClientId\s+\$ClientId\s+-ReturnConnection'
         }
 
-        It 'Should reuse a fresh access token per site via Get-PnPAccessToken' {
-            $scriptContent | Should -Match 'Get-PnPAccessToken\s+-Connection\s+\$script:DelegatedAuthConnection'
+        It 'Should connect to each site by reusing the single sign-in SharePoint token (one prompt)' {
+            # One prompt for the whole run: mint a SharePoint-audience delegated token from the
+            # anchor connection and connect per site with -AccessToken. -ResourceTypeName SharePoint
+            # is mandatory (the default token is Microsoft Graph, which CSOM SharePoint rejects).
+            $scriptContent | Should -Match 'Get-PnPAccessToken\s+-Connection\s+\$script:DelegatedAuthConnection\s+-ResourceTypeName\s+SharePoint'
             $scriptContent | Should -Match 'Connect-PnPOnline\s+-Url\s+\$SiteUrl\s+-AccessToken\s+\$accessToken'
         }
 
-        It 'Should fall back to per-operation interactive login when the single sign-in fails' {
-            $scriptContent | Should -Match 'Falling back to interactive login per operation'
-            $scriptContent | Should -Match 'Connect-PnPOnline\s+-Url\s+\$SiteUrl\s+-Interactive\s+-ClientId\s+\$ClientId'
+        It 'Should not use the binding-incompatible -ResourceUrl token form' {
+            $scriptContent | Should -Not -Match 'Get-PnPAccessToken[^\r\n]*-ResourceUrl'
         }
 
         It 'Should require ClientId for local/interactive execution' {
@@ -882,7 +884,7 @@ Describe 'SPSCleanVersions Script' {
         BeforeAll {
             $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
             $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
-            $wanted = 'Invoke-RetryCommand', 'Get-RetryAfterDelay', 'Test-IsAuthError'
+            $wanted = 'Invoke-RetryCommand', 'Get-RetryAfterDelay', 'Test-IsAuthError', 'Test-IsAccessDeniedError'
             $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
             foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
         }
@@ -926,6 +928,33 @@ Describe 'SPSCleanVersions Script' {
                     $script:calls++; throw 'boom'
                 } } | Should -Throw
             $script:calls | Should -Be 3
+        }
+
+        It 'Invoke-RetryCommand fails fast on authentication errors (no retry)' {
+            # Auth/authorization failures are structural: retrying with the same token cannot
+            # recover them, so the command must throw on the first attempt without sleeping.
+            $script:calls = 0
+            $script:slept = $false
+            Mock -CommandName Start-Sleep -MockWith { $script:slept = $true }
+            { Invoke-RetryCommand -OperationName 'auth' -BaseDelaySeconds 1 -MaxRetries 5 -ScriptBlock {
+                    $script:calls++; throw 'The remote server returned an error: (401) Unauthorized.'
+                } } | Should -Throw
+            $script:calls | Should -Be 1
+            $script:slept | Should -BeFalse
+        }
+
+        It 'Invoke-RetryCommand fails fast on access-denied (site permission) errors (no retry)' {
+            # "Attempted to perform an unauthorized operation" is a site-permission problem (not a
+            # transient/token issue): the command must throw on the first attempt without sleeping,
+            # so the per-site handler can classify it as AccessDenied.
+            $script:calls = 0
+            $script:slept = $false
+            Mock -CommandName Start-Sleep -MockWith { $script:slept = $true }
+            { Invoke-RetryCommand -OperationName 'denied' -BaseDelaySeconds 1 -MaxRetries 5 -ScriptBlock {
+                    $script:calls++; throw 'Attempted to perform an unauthorized operation.'
+                } } | Should -Throw
+            $script:calls | Should -Be 1
+            $script:slept | Should -BeFalse
         }
 
         It 'Invoke-RetryCommand honours a Retry-After hint (capped) instead of backoff' {
@@ -972,6 +1001,15 @@ Describe 'SPSCleanVersions Script' {
             Test-IsAuthError -ErrorRecord $auth | Should -BeTrue
             Test-IsAuthError -ErrorRecord $other | Should -BeFalse
         }
+
+        It 'Test-IsAccessDeniedError detects site-permission failures and ignores others' {
+            $denied = try { throw 'Attempted to perform an unauthorized operation.' } catch { $_ }
+            $denied2 = try { throw 'Access denied. You do not have permission to perform this action.' } catch { $_ }
+            $throttle = try { throw 'Request was throttled. Retry-After: 30' } catch { $_ }
+            Test-IsAccessDeniedError -ErrorRecord $denied | Should -BeTrue
+            Test-IsAccessDeniedError -ErrorRecord $denied2 | Should -BeTrue
+            Test-IsAccessDeniedError -ErrorRecord $throttle | Should -BeFalse
+        }
     }
 
     Context 'Error handling' {
@@ -992,6 +1030,39 @@ Describe 'SPSCleanVersions Script' {
 
         It 'Should write warnings for failed list updates' {
             $scriptContent | Should -Match 'Write-Warning'
+        }
+
+        It 'Should classify per-site access-denied as a distinct, actionable outcome (not a hard failure)' {
+            # The per-site catch branches on Test-IsAccessDeniedError to emit an actionable warning
+            # (not site collection admin) and records Outcome 'AccessDenied' instead of 'Failed'.
+            $scriptContent | Should -Match 'if \(Test-IsAccessDeniedError -ErrorRecord \$_\)'
+            $scriptContent | Should -Match "Outcome 'AccessDenied'"
+            $scriptContent | Should -Match 'is not a site collection administrator on this site'
+        }
+
+        It 'Should not mask access-denied as drift or as a generic Failed row (re-throw to the per-site handler)' {
+            # Access-denied must bubble up to the single per-site AccessDenied handler rather than
+            # being swallowed by the drift fail-safe ("treat as drift") or the apply catch ("Failed").
+            # Both intermediate catches re-throw when Test-IsAccessDeniedError is true.
+            $reThrows = ([regex]::Matches($scriptContent, 'if \(Test-IsAccessDeniedError -ErrorRecord \$_\) \{\s*(#[^\r\n]*\r?\n\s*)*throw')).Count
+            $reThrows | Should -BeGreaterOrEqual 2
+            # Invoke-RetryCommand checks access-denied BEFORE the auth branch (so no token-oriented
+            # message is emitted for a permission problem).
+            $idxDenied = $scriptContent.IndexOf('if (Test-IsAccessDeniedError -ErrorRecord $_)')
+            $idxAuth = $scriptContent.IndexOf('if (Test-IsAuthError -ErrorRecord $_)')
+            $idxDenied | Should -BeLessThan $idxAuth
+        }
+
+        It 'Should surface an end-of-run advisory and count for access-denied sites' {
+            $scriptContent | Should -Match '\$sumAccessDenied = @\(\$script:RunResults \| Where-Object \{ \$_\.Outcome -eq ''AccessDenied'' \}\)\.Count'
+            $scriptContent | Should -Match 'access-denied'
+            $scriptContent | Should -Match 'if \(\$sumAccessDenied -gt 0\) \{'
+        }
+
+        It 'Report styles the AccessDenied outcome (badge + KPI card)' {
+            $scriptContent | Should -Match '\.badge\.AccessDenied\{'
+            $scriptContent | Should -Match 'Access denied</div>'
+            $scriptContent | Should -Match "\`$r\.Outcome -eq 'AccessDenied'"
         }
     }
 }

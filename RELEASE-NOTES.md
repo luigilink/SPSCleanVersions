@@ -5,10 +5,22 @@
 ### Changed
 
 - SPSCleanVersions.ps1
-  - **Single interactive prompt for `SiteScope: All`** — sign in once before enumerating the
-    tenant and reuse that connection for enumeration and every site (was two prompts).
+  - **Single interactive prompt on every platform** — sign in once, then reuse the
+    single sign-in's **SharePoint-audience** delegated token (`Get-PnPAccessToken
+    -ResourceTypeName SharePoint`) for every site via `Connect-PnPOnline -AccessToken`
+    (was one prompt per site on macOS). The default token is Microsoft Graph, which CSOM
+    SharePoint cmdlets reject, so the SharePoint resource is requested explicitly.
+  - **Retry fails fast on auth/authorization errors** instead of 5x exponential backoff on
+    structural 401s.
 
 ### Added
+
+- SPSCleanVersions.ps1
+  - **Actionable "access denied" detection** — a site the signed-in account cannot manage
+    (not a **site collection administrator**) is recorded as a distinct `AccessDenied`
+    outcome with a clear message, the run continues, and an end-of-run advisory plus a
+    dedicated report count/badge are shown. (A future opt-in will add the admin
+    automatically.)
 
 - SPSCleanVersions.ps1
   - **Full reporting**: the HTML report gains **Library / Major / Minor / ExpireAfterDays**
@@ -59,5 +71,14 @@
 - Wiki
   - New **"Azure Automation (app-only) limitations"** section documenting what works and
     what requires a delegated context under a Managed Identity runbook.
+  - New **"Site collection administrator requirement (delegated runs)"** section: delegated
+    rights are the intersection of the app scope **and** the signed-in user's rights on each
+    site, so the account must be a site collection administrator on every target site (a
+    tenant SharePoint Administrator role is not sufficient by itself). Documents the
+    `AccessDenied` outcome and the fix (`Set-PnPTenantSite -Owners`), plus the run resilience
+    (single sign-in, throttling retry, fail-fast) and the enriched report.
+- Config
+  - `Config/SPSCleanVersions.example.json` expanded into a full template covering the site
+    version policy modes and all supported properties.
 
 A full list of changes in each version can be found in the [change log](CHANGELOG.md)

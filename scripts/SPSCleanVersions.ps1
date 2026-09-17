@@ -71,6 +71,9 @@
                               to narrow the enumeration when SiteScope is 'All'.
       - EnableReport          (boolean, optional, default: true) — write a local HTML report
                               to Results/ (local execution only; not produced in Azure Automation).
+      - EnumerateLibraries    (boolean, optional, default: false) — site version policy modes
+                              only; also list the in-scope document libraries as informative
+                              'InScope' report rows (adds a Get-PnPList call per site).
       - LogRetentionDays      (integer, optional, default: 180) — prune Logs/ and Results/ files
                               older than this many days (local only). 0 disables pruning.
 
@@ -358,6 +361,23 @@ function Test-IsAuthError {
     return [bool]($message -match '(?i)(\b401\b|unauthorized|invalid.?authentication|token (is )?expired|expired token|access token|AADSTS\d+|InvalidAuthenticationToken)')
 }
 
+function Test-IsAccessDeniedError {
+    <#
+        .SYNOPSIS
+        Returns $true when an error indicates the caller lacks permission on the target object —
+        typically the signed-in account is not a site collection administrator on the site — as
+        opposed to a token / sign-in failure. SharePoint CSOM surfaces this as "Attempted to
+        perform an unauthorized operation", an explicit access-denied, or an HTTP 403.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory = $true)] [System.Management.Automation.ErrorRecord] $ErrorRecord
+    )
+    $message = [string]$ErrorRecord.Exception.Message
+    return [bool]($message -match '(?i)(attempted to perform an unauthorized operation|access is denied|access denied|\b403\b|current user (has insufficient permissions|does not have permission))')
+}
+
 function Invoke-RetryCommand {
     <#
         .SYNOPSIS
@@ -384,12 +404,23 @@ function Invoke-RetryCommand {
             return & $ScriptBlock
         }
         catch {
+            if (Test-IsAccessDeniedError -ErrorRecord $_) {
+                # Permission problem on the target object (typically the signed-in account is not a
+                # site collection administrator on the site). Not transient and not a token issue —
+                # do not retry and do not emit a token-oriented message here; let the per-site
+                # handler classify and skip it with actionable guidance.
+                throw
+            }
+            if (Test-IsAuthError -ErrorRecord $_) {
+                # Authentication / token failures are structural, not transient: retrying with the
+                # same token cannot fix a wrong audience, a revoked grant or an app-only limitation,
+                # and only slows the run down (previously 5x exponential backoff). Surface it
+                # immediately with actionable guidance instead.
+                Write-Warning "[$OperationName] authentication/token error: $($_.Exception.Message). Not retrying — check the ClientId / app registration / token audience."
+                throw
+            }
             if ($attempt -ge $MaxRetries) { throw }
             $attempt++
-
-            if (Test-IsAuthError -ErrorRecord $_) {
-                Write-Warning "[$OperationName] attempt $attempt/$MaxRetries hit an authentication/token error: $($_.Exception.Message). Retrying; if this persists, check the ClientId / app registration."
-            }
 
             $retryAfter = Get-RetryAfterDelay -ErrorRecord $_
             if ($retryAfter -gt 0) {
@@ -465,11 +496,12 @@ function Export-SPSCleanVersionsReport {
     $wouldApply = @($rows | Where-Object { $_.Outcome -eq 'WouldApply' }).Count
     $skipped = @($rows | Where-Object { $_.Outcome -eq 'Skipped' -or $_.Outcome -eq 'Compliant' }).Count
     $failed = @($rows | Where-Object { $_.Outcome -eq 'Failed' }).Count
+    $accessDenied = @($rows | Where-Object { $_.Outcome -eq 'AccessDenied' }).Count
     $appliedLabel = if ($DryRunMode) { 'Would apply' } else { 'Applied' }
     $appliedValue = if ($DryRunMode) { $wouldApply } else { $applied }
     $generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    $overall = if ($failed -gt 0) { 'ATTENTION' } else { 'OK' }
-    $overallClass = if ($failed -gt 0) { 'kpi-alert' } else { 'kpi-ok' }
+    $overall = if ($failed -gt 0 -or $accessDenied -gt 0) { 'ATTENTION' } else { 'OK' }
+    $overallClass = if ($failed -gt 0 -or $accessDenied -gt 0) { 'kpi-alert' } else { 'kpi-ok' }
     $dryTag = if ($DryRunMode) { '<span class="kpi kpi-dry">DryRun</span>' } else { '' }
 
     $css = @'
@@ -504,6 +536,7 @@ tr.row-alert td{background:#fff5f5}
 .badge.WouldApply{background:#6f42c1}
 .badge.Skipped,.badge.Compliant{background:#9aa4ad}
 .badge.Failed{background:#c0392b}
+.badge.AccessDenied{background:#e67e22}
 .badge.InScope{background:#0a7d8c}
 footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
 '@
@@ -511,7 +544,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
     $sb = New-Object System.Text.StringBuilder
     foreach ($r in $rows) {
         $oc = ConvertTo-SPSHtmlEncoded ([string]$r.Outcome)
-        $rowClass = if ($r.Outcome -eq 'Failed') { ' class="row-alert"' } else { '' }
+        $rowClass = if ($r.Outcome -eq 'Failed' -or $r.Outcome -eq 'AccessDenied') { ' class="row-alert"' } else { '' }
         [void]$sb.Append("<tr$rowClass><td>" + (ConvertTo-SPSHtmlEncoded ([string]$r.Site)) + '</td>')
         [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Scope)) + '</td>')
         [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Library)) + '</td>')
@@ -523,6 +556,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
     }
 
     $failedCardClass = if ($failed -gt 0) { 'card accent' } else { 'card' }
+    $accessDeniedCardClass = if ($accessDenied -gt 0) { 'card accent' } else { 'card' }
     $encTitle = ConvertTo-SPSHtmlEncoded $Title
     $encVer = ConvertTo-SPSHtmlEncoded $Version
     $page = @"
@@ -538,6 +572,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
     <div class="card"><div class="card-value">$appliedValue</div><div class="card-label">$appliedLabel</div></div>
     <div class="card"><div class="card-value">$skipped</div><div class="card-label">Skipped / compliant</div></div>
     <div class="$failedCardClass"><div class="card-value">$failed</div><div class="card-label">Failed</div></div>
+    <div class="$accessDeniedCardClass"><div class="card-value">$accessDenied</div><div class="card-label">Access denied</div></div>
   </div>
   <section>
     <h2>Per-site results</h2>
@@ -627,6 +662,12 @@ function Test-SiteVersionPolicyDrift {
         $current = Invoke-RetryCommand -OperationName 'Get-PnPSiteVersionPolicy' -ScriptBlock { Get-PnPSiteVersionPolicy -ErrorAction Stop }
     }
     catch {
+        if (Test-IsAccessDeniedError -ErrorRecord $_) {
+            # Access denied reading the policy = the account lacks rights on this site. Do NOT mask
+            # it as "drift" (which would mis-report the site as WouldApply/Applied); let it bubble
+            # up so the per-site handler records it as AccessDenied and skips the site.
+            throw
+        }
         Write-Verbose "Test-SiteVersionPolicyDrift: unable to read current policy ($($_.Exception.Message)); treating as drift."
         return $true
     }
@@ -820,12 +861,12 @@ function Get-TenantSiteUrls {
     }
 }
 
-# --- Local sign-in: sign in ONCE (interactive) and reuse the SAME connection for BOTH the
-# tenant enumeration and every site, so a SiteScope=All run prompts a single time (not once
-# for enumeration and again for the batch). The delegated SharePoint token is tenant-wide, so
-# one connection anchored on the admin center (or the first site) serves everything. It is
-# re-read each iteration so MSAL refreshes it silently over a long run. If the single sign-in
-# fails we fall back to the previous per-operation interactive behaviour.
+# --- Local sign-in: sign in ONCE (interactive) before enumeration and the site loop, so the whole
+# run prompts a single time. This anchor connection serves the tenant enumeration directly (passed
+# as -Connection to Get-PnPTenantSite) and is the source of the delegated SharePoint token reused
+# for every site in the loop below (via Get-PnPAccessToken -ResourceTypeName SharePoint +
+# Connect-PnPOnline -AccessToken), so no per-site prompt occurs on any platform. If the single
+# sign-in fails we fall back to per-site interactive login (which would prompt).
 $script:DelegatedAuthConnection = $null
 if (-not $script:IsAzureAutomationRun) {
     if ([string]::IsNullOrWhiteSpace($ClientId)) {
@@ -841,7 +882,7 @@ if (-not $script:IsAzureAutomationRun) {
         try {
             Write-Output "Signing in once (interactive) via: $anchorUrl ..."
             $script:DelegatedAuthConnection = Connect-PnPOnline -Url $anchorUrl -Interactive -ClientId $ClientId -ReturnConnection
-            Write-Output "Interactive sign-in complete. The delegated connection is reused for enumeration and every site; no further prompts expected."
+            Write-Output "Interactive sign-in complete. It drives tenant enumeration and its delegated token is reused for every site; no further prompts expected."
         }
         catch {
             Write-Warning "Single sign-in failed ($($_.Exception.Message)). Falling back to interactive login per operation."
@@ -885,9 +926,16 @@ foreach ($SiteUrl in $SiteUrls) {
         }
         else {
             if ($null -ne $script:DelegatedAuthConnection) {
-                # Reuse the single sign-in: read a fresh (silently MSAL-refreshed) token from
-                # the interactive connection and connect to this site with it — no prompt.
-                $accessToken = Get-PnPAccessToken -Connection $script:DelegatedAuthConnection
+                # One prompt for the whole run: reuse the single interactive sign-in by minting a
+                # fresh SharePoint-audience delegated token from it and connecting to this site with
+                # that token — no per-site prompt on any platform (incl. macOS, where per-site
+                # -Interactive re-shows the account picker). The token is re-read each iteration so
+                # MSAL refreshes it silently over long runs.
+                # -ResourceTypeName SharePoint is REQUIRED: Get-PnPAccessToken defaults to a
+                # Microsoft Graph token, which CSOM SharePoint cmdlets (e.g. Get-PnPSiteVersionPolicy)
+                # reject. The SharePoint token's audience is the SharePoint Online service, so it is
+                # tenant-wide and valid for every site in the loop.
+                $accessToken = Get-PnPAccessToken -Connection $script:DelegatedAuthConnection -ResourceTypeName SharePoint
                 Connect-PnPOnline -Url $SiteUrl -AccessToken $accessToken
             }
             else {
@@ -1054,6 +1102,11 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
                     }
                 }
                 catch {
+                    if (Test-IsAccessDeniedError -ErrorRecord $_) {
+                        # Let the per-site handler record this as AccessDenied (single source of
+                        # truth) rather than a generic Failed row.
+                        throw
+                    }
                     Write-Warning "`tFAILED to apply site version policy on ${SiteUrl}: $($_.Exception.Message)"
                     Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Outcome 'Failed' `
                         -Major "$KeepMajorVersions" -ExpireAfterDays $expireReported -Detail $_.Exception.Message
@@ -1089,8 +1142,20 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
         }
     }
     catch {
-        Write-Error "Failed to process site $SiteUrl : $($_.Exception.Message)"
-        Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'Failed' -Detail $_.Exception.Message
+        if (Test-IsAccessDeniedError -ErrorRecord $_) {
+            # Access denied on this site: the signed-in account almost always lacks site collection
+            # administrator rights on it. Delegated permissions are the intersection of the app
+            # scope AND the user's own rights, so a full-control app scope is useless when the user
+            # has no rights on the site. This is a setup gap, not a script defect — surface an
+            # actionable warning, record the site as AccessDenied with the reason, and continue.
+            Write-Warning "Access denied on ${SiteUrl}: the signed-in account is not a site collection administrator on this site. Add it as a site collection admin (or, once available, re-run with the AddSiteCollectionAdmin option) and retry. Skipping this site. Original error: $($_.Exception.Message)"
+            Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'AccessDenied' `
+                -Detail 'Access denied: the signed-in account is not a site collection administrator on this site. Grant site admin and retry.'
+        }
+        else {
+            Write-Error "Failed to process site $SiteUrl : $($_.Exception.Message)"
+            Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'Failed' -Detail $_.Exception.Message
+        }
     }
     finally {
         Disconnect-PnPOnline
@@ -1137,10 +1202,14 @@ if ($EnableReport -and -not $script:IsAzureAutomationRun) {
 $sumApplied = @($script:RunResults | Where-Object { $_.Outcome -eq 'Applied' }).Count
 $sumWouldApply = @($script:RunResults | Where-Object { $_.Outcome -eq 'WouldApply' }).Count
 $sumSkipped = @($script:RunResults | Where-Object { $_.Outcome -eq 'Skipped' -or $_.Outcome -eq 'Compliant' }).Count
+$sumAccessDenied = @($script:RunResults | Where-Object { $_.Outcome -eq 'AccessDenied' }).Count
 $sumFailed = @($script:RunResults | Where-Object { $_.Outcome -eq 'Failed' }).Count
 $distinctSites = @($script:RunResults | Select-Object -ExpandProperty Site -Unique).Count
 $appliedPart = if ($WhatIfPreference) { "$sumWouldApply would apply" } else { "$sumApplied applied" }
-Write-Output "--- SPSCleanVersions finished: $distinctSites site(s), $($script:RunResults.Count) result(s) — $appliedPart, $sumSkipped skipped/compliant, $sumFailed failed ---"
+Write-Output "--- SPSCleanVersions finished: $distinctSites site(s), $($script:RunResults.Count) result(s) — $appliedPart, $sumSkipped skipped/compliant, $sumAccessDenied access-denied, $sumFailed failed ---"
+if ($sumAccessDenied -gt 0) {
+    Write-Warning "$sumAccessDenied site(s) were skipped because the signed-in account is not a site collection administrator on them. Grant site collection admin on those sites (see the report for the list) and re-run."
+}
 
 if ($script:TranscriptStarted) {
     try { Stop-Transcript -WhatIf:$false | Out-Null } catch { }

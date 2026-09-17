@@ -21,8 +21,9 @@ This tool relies on the PnP.PowerShell module version 2.12.0 or later. [Installa
 
 ### Permissions
 
-* **Role:** SharePoint Administrator or Global Administrator.
-* **API Permissions:** `Sites.FullControl.All` (when using App Registration).
+* **Role:** SharePoint Administrator or Global Administrator (to register the app and to run tenant-wide operations).
+* **API Permissions:** delegated `AllSites.FullControl` (interactive/local) or application `Sites.FullControl.All` (Managed Identity / certificate) on the app registration.
+* **Site collection administrator (delegated runs only):** for **local / interactive** execution the effective rights are the **intersection** of the app scope **and** the signed-in user's own rights on each site, so the account must be a **site collection administrator** on every target site. A tenant SharePoint Administrator role does **not** by itself grant content access to an individual site collection. Sites where the account lacks rights are reported as `AccessDenied` and skipped (the run continues). Add the account as site admin (`Set-PnPTenantSite -Url <site> -Owners <upn>`, or the admin center → *Active sites* → *Membership* → *Site admins*) and re-run. This does not apply to app-only (Managed Identity / certificate) runs, where the app is the identity.
 
 ### Local authentication (interactive) — `ClientId` required
 

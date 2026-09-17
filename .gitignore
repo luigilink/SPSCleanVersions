@@ -8,3 +8,6 @@ Config/*.json
 # Local run artifacts
 Logs/
 Results/
+
+# Throwaway local diagnostic scripts (never committed)
+scripts/_diag*.ps1
