@@ -3,7 +3,7 @@
 The format is based on and uses the types of changes according to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.2.0] - 2026-09-16
+## [Unreleased]
 
 ### Changed
 
@@ -19,16 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     interactively with a SharePoint Administrator. The run no longer reports a spurious
     `Failed` for the part that cannot run app-only.
 
-### Documentation
-
-- Wiki
-  - Add an **"Azure Automation (app-only) limitations"** section listing exactly what
-    works and what does not under a Managed Identity runbook (site enumeration, policy
-    reads, Legacy mode and new-libraries writes work; existing-libraries writes and force
-    delete require a delegated context; no HTML report/transcript in the sandbox).
-
-## [3.1.5] - 2026-09-16
-
 ### Fixed
 
 - SPSCleanVersions.ps1
@@ -43,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     ExpireVersionsAfterDays, MajorVersions and MajorWithMinorVersions when
     EnableAutoExpirationVersionTrim is false for document libraries that including
     existing ones."* ([#33](https://github.com/luigilink/SPSCleanVersions/issues/33))
+
+### Documentation
+
+- Wiki
+  - Add an **"Azure Automation (app-only) limitations"** section listing exactly what
+    works and what does not under a Managed Identity runbook (site enumeration, policy
+    reads, Legacy mode and new-libraries writes work; existing-libraries writes and force
+    delete require a delegated context; no HTML report/transcript in the sandbox).
 
 ## [3.1.4] - 2026-07-15
 
