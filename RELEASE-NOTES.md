@@ -5,6 +5,13 @@
 ### Changed
 
 - SPSCleanVersions.ps1
+  - **Local execution — single sign-in with delegated token reuse.** Instead of
+    `Connect-PnPOnline -Interactive` per site (which re-prompts on every site and breaks
+    large batches), the script now signs in interactively **once** and reuses the
+    delegated, tenant-wide SharePoint token for all sites, refreshing it silently via MSAL
+    before expiry. Falls back to per-site interactive if the single sign-in fails.
+    `ClientId` is now required for local execution.
+    ([#37](https://github.com/luigilink/SPSCleanVersions/issues/37))
   - **Azure Automation (app-only) — existing document libraries.** Applying a site
     version policy to *existing* document libraries is not supported app-only
     (*"Cannot call this API with an app-only principal"*). The runbook now gracefully

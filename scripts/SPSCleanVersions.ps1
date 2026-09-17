@@ -48,7 +48,10 @@
       - SiteUrls              (string array, required) — Site Collection URLs to process.
       - KeepMajorVersions     (integer, optional, default: 50) — Number of major versions to keep.
       - KeepMinorVersions     (integer, optional, default: 0) — Number of minor versions to keep.
-      - ClientId              (string, optional) — Azure AD App Registration Client ID.
+      - ClientId              (string, optional in Azure Automation; REQUIRED for local
+                              execution) — Azure AD App Registration Client ID. Local runs
+                              sign in interactively once via this app and reuse the
+                              delegated token (auto-refreshed) across all sites.
       - ForceDeleteOldVersions (boolean, optional, default: false) — Trigger batch delete of old file versions.
       - DryRun                (boolean, optional, default: false) — Simulate changes without applying them.
       - VersionPolicyMode     (string, optional, default: 'Legacy') — Version policy mechanism.
@@ -699,6 +702,37 @@ if ($SiteScope -eq 'All') {
     }
 }
 
+# --- Local batch auth: sign in ONCE and reuse a delegated token across all sites ---
+# Interactive sign-in per site does not scale for batches: each Connect-PnPOnline -Interactive
+# can re-prompt for a browser login, which is unusable for hundreds/thousands of sites. For
+# local execution we therefore sign in ONCE (interactive) to an anchor site to establish a
+# delegated MSAL context, then reuse its access token for every site. The token is a
+# SharePoint token, which is valid tenant-wide, and it is re-read from the interactive
+# connection on each iteration so MSAL refreshes it silently before it expires — no repeated
+# browser prompts over a long run. If the single sign-in fails we fall back to the previous
+# per-site interactive behaviour.
+$script:DelegatedAuthConnection = $null
+if (-not $script:IsAzureAutomationRun -and @($SiteUrls).Count -gt 0) {
+    if ([string]::IsNullOrWhiteSpace($ClientId)) {
+        throw "ClientId is required for local/interactive execution. Register an app once with 'Register-PnPEntraIDAppForInteractiveLogin' and pass its Client ID as the 'ClientId' config property."
+    }
+    # Anchor on a regular site (valid tenant-wide token); fall back to the admin URL if needed.
+    $anchorUrl = if (@($SiteUrls).Count -gt 0) { @($SiteUrls)[0] }
+    elseif (-not [string]::IsNullOrWhiteSpace($TenantAdminUrl)) { $TenantAdminUrl }
+    else { $null }
+    if ($null -ne $anchorUrl) {
+        try {
+            Write-Output "Signing in once (interactive) for the whole batch via: $anchorUrl ..."
+            $script:DelegatedAuthConnection = Connect-PnPOnline -Url $anchorUrl -Interactive -ClientId $ClientId -ReturnConnection
+            Write-Output "Interactive sign-in complete. The delegated token will be reused (auto-refreshed) for every site; no further prompts expected."
+        }
+        catch {
+            Write-Warning "Single batch sign-in failed ($($_.Exception.Message)). Falling back to interactive login per site."
+            $script:DelegatedAuthConnection = $null
+        }
+    }
+}
+
 foreach ($SiteUrl in $SiteUrls) {
     Write-Output "Processing Site: $SiteUrl"
 
@@ -714,8 +748,16 @@ foreach ($SiteUrl in $SiteUrls) {
             }
         }
         else {
-            Write-Output "Running locally. Connecting via Interactive login..."
-            Connect-PnPOnline -Url $SiteUrl -Interactive -ClientId $ClientId
+            if ($null -ne $script:DelegatedAuthConnection) {
+                # Reuse the single batch sign-in: read a fresh (silently MSAL-refreshed) token
+                # from the interactive connection and connect to this site with it — no prompt.
+                $accessToken = Get-PnPAccessToken -Connection $script:DelegatedAuthConnection
+                Connect-PnPOnline -Url $SiteUrl -AccessToken $accessToken
+            }
+            else {
+                Write-Output "Running locally. Connecting via Interactive login..."
+                Connect-PnPOnline -Url $SiteUrl -Interactive -ClientId $ClientId
+            }
         }
 
         if ($VersionPolicyMode -eq 'Legacy') {

@@ -338,6 +338,34 @@ Describe 'SPSCleanVersions Script' {
         }
     }
 
+    Context 'Local batch authentication (token reuse)' {
+
+        It 'Should establish a single delegated connection before the site loop' {
+            # #37: sign in once and reuse the token, instead of Connect-PnPOnline -Interactive
+            # per site (which re-prompts for a browser login on every site in a batch).
+            $scriptContent | Should -Match '\$script:DelegatedAuthConnection'
+            $scriptContent | Should -Match 'Connect-PnPOnline\s+-Url\s+\$anchorUrl\s+-Interactive\s+-ClientId\s+\$ClientId\s+-ReturnConnection'
+        }
+
+        It 'Should reuse a fresh access token per site via Get-PnPAccessToken' {
+            $scriptContent | Should -Match 'Get-PnPAccessToken\s+-Connection\s+\$script:DelegatedAuthConnection'
+            $scriptContent | Should -Match 'Connect-PnPOnline\s+-Url\s+\$SiteUrl\s+-AccessToken\s+\$accessToken'
+        }
+
+        It 'Should fall back to per-site interactive login when the single sign-in fails' {
+            $scriptContent | Should -Match 'Falling back to interactive login per site'
+            $scriptContent | Should -Match 'Connect-PnPOnline\s+-Url\s+\$SiteUrl\s+-Interactive\s+-ClientId\s+\$ClientId'
+        }
+
+        It 'Should require ClientId for local/interactive execution' {
+            $scriptContent | Should -Match "ClientId is required for local/interactive execution"
+        }
+
+        It 'Should not attempt the single sign-in in Azure Automation' {
+            $scriptContent | Should -Match '-not \$script:IsAzureAutomationRun -and @\(\$SiteUrls\)\.Count -gt 0'
+        }
+    }
+
     Context 'Site version policy feature' {
 
         It 'Should define the Set-SiteVersionPolicy helper function' {
