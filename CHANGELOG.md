@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - SPSCleanVersions.ps1
+  - **Local DryRun now writes the HTML report and transcript.** In a local run, `DryRun`
+    enables `$WhatIfPreference` globally, which also suppressed the tool's own artifact
+    writes: the `Logs/`/`Results/` folder creation (`New-Item`), the transcript
+    (`Start-Transcript` / `Stop-Transcript`), the HTML report (`Set-Content`) and the
+    retention pruning (`Remove-Item`) all fell under WhatIf, so a DryRun produced **no
+    report and no transcript**. These local artifact operations now pass `-WhatIf:$false`
+    so they run in DryRun as well, while the SharePoint changes stay simulated. No effect
+    in Azure Automation. ([#39](https://github.com/luigilink/SPSCleanVersions/issues/39))
   - **Site version policy (`ExpireAfter` / `NoExpiration`)** — applying the policy to
     existing document libraries no longer fails when no minor-version count is configured
     (`KeepMinorVersions` absent / `0`). `MajorWithMinorVersions` was gated by a `-gt 0`
