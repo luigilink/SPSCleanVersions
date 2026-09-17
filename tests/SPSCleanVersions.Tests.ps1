@@ -266,8 +266,8 @@ Describe 'SPSCleanVersions Script' {
 
     Context 'Core logic patterns' {
 
-        It 'Should iterate over SiteUrls with foreach (skipped when orchestrating)' {
-            $scriptContent | Should -Match 'foreach\s*\(\$SiteUrl\s+in\s+\$\(if\s*\(\$script:RunAsOrchestrator\)'
+        It 'Should iterate over SiteUrls with foreach' {
+            $scriptContent | Should -Match 'foreach\s*\(\$SiteUrl\s+in\s+\$SiteUrls\)'
         }
 
         It 'Should connect to PnP Online' {
@@ -338,31 +338,38 @@ Describe 'SPSCleanVersions Script' {
         }
     }
 
-    Context 'Local batch authentication (token reuse)' {
+    Context 'Local single sign-in (one prompt, per-site interactive)' {
 
         It 'Should establish a single delegated connection before the site loop' {
-            # #37: sign in once and reuse the token, instead of Connect-PnPOnline -Interactive
-            # per site (which re-prompts for a browser login on every site in a batch).
             $scriptContent | Should -Match '\$script:DelegatedAuthConnection'
             $scriptContent | Should -Match 'Connect-PnPOnline\s+-Url\s+\$anchorUrl\s+-Interactive\s+-ClientId\s+\$ClientId\s+-ReturnConnection'
         }
 
-        It 'Should reuse a fresh access token per site via Get-PnPAccessToken' {
-            $scriptContent | Should -Match 'Get-PnPAccessToken\s+-Connection\s+\$script:DelegatedAuthConnection'
+        It 'Should connect to each site by reusing the single sign-in SharePoint token (one prompt)' {
+            # One prompt for the whole run: mint a SharePoint-audience delegated token from the
+            # anchor connection and connect per site with -AccessToken. -ResourceTypeName SharePoint
+            # is mandatory (the default token is Microsoft Graph, which CSOM SharePoint rejects).
+            $scriptContent | Should -Match 'Get-PnPAccessToken\s+-Connection\s+\$script:DelegatedAuthConnection\s+-ResourceTypeName\s+SharePoint'
             $scriptContent | Should -Match 'Connect-PnPOnline\s+-Url\s+\$SiteUrl\s+-AccessToken\s+\$accessToken'
         }
 
-        It 'Should fall back to per-site interactive login when the single sign-in fails' {
-            $scriptContent | Should -Match 'Falling back to interactive login per site'
-            $scriptContent | Should -Match 'Connect-PnPOnline\s+-Url\s+\$SiteUrl\s+-Interactive\s+-ClientId\s+\$ClientId'
+        It 'Should not use the binding-incompatible -ResourceUrl token form' {
+            $scriptContent | Should -Not -Match 'Get-PnPAccessToken[^\r\n]*-ResourceUrl'
         }
 
         It 'Should require ClientId for local/interactive execution' {
             $scriptContent | Should -Match "ClientId is required for local/interactive execution"
         }
 
-        It 'Should not attempt the single sign-in in Azure Automation or worker mode' {
-            $scriptContent | Should -Match '-not \$script:IsAzureAutomationRun -and -not \$IsWorker -and @\(\$SiteUrls\)\.Count -gt 0'
+        It 'Should not attempt the single sign-in in Azure Automation' {
+            $scriptContent | Should -Match 'if \(-not \$script:IsAzureAutomationRun\) \{'
+        }
+
+        It 'Should sign in before tenant enumeration and reuse the connection for it (single prompt)' {
+            # Sign-in happens before the SiteScope=All enumeration and the connection is passed
+            # to Get-TenantSiteUrls so enumeration does not trigger a second interactive prompt.
+            $scriptContent | Should -Match 'Get-TenantSiteUrls -AdminUrl \$TenantAdminUrl -Filter \$SiteFilter -ClientId \$ClientId -Connection \$script:DelegatedAuthConnection'
+            $scriptContent | Should -Match 'if \(\$null -ne \$Connection\) \{ \$getParams\[''Connection''\] = \$Connection \}'
         }
     }
 
@@ -770,7 +777,7 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'ConvertTo-Json -InputObject \$jsonRows'
             $scriptContent | Should -Not -Match '@\(\$script:RunResults\) \| ConvertTo-Json'
             # JSON emission is outside the non-empty HTML gate (empty run still yields []).
-            $scriptContent | Should -Match "if \(\`$EnableReport -and -not \`$script:IsAzureAutomationRun -and -not \`$IsWorker\)"
+            $scriptContent | Should -Match "if \(\`$EnableReport -and -not \`$script:IsAzureAutomationRun\) \{"
             # results.json is covered by retention pruning.
             $scriptContent | Should -Match "Clear-OldRunFiles -Path \`$script:ResultsFolder -Retention \`$LogRetentionDays -Filter '\*\.json'"
         }
@@ -782,11 +789,6 @@ Describe 'SPSCleanVersions Script' {
         It 'HTML report card counts distinct sites, not rows' {
             $scriptContent | Should -Match '\$distinctSites = @\(\$rows'
             $scriptContent | Should -Match '<div class="card-value">\$distinctSites</div><div class="card-label">Sites processed</div>'
-        }
-
-        It 'Multi-thread merge carries the structured fields back from workers' {
-            $scriptContent | Should -Match '-Library \(\[string\]\$row\.Library\)'
-            $scriptContent | Should -Match '-ExpireAfterDays \(\[string\]\$row\.ExpireAfterDays\)'
         }
 
         It 'Should start a transcript for local runs' {
@@ -882,7 +884,7 @@ Describe 'SPSCleanVersions Script' {
         BeforeAll {
             $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
             $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
-            $wanted = 'Invoke-RetryCommand', 'Get-RetryAfterDelay', 'Test-IsAuthError'
+            $wanted = 'Invoke-RetryCommand', 'Get-RetryAfterDelay', 'Test-IsAuthError', 'Test-IsAccessDeniedError'
             $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
             foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
         }
@@ -926,6 +928,33 @@ Describe 'SPSCleanVersions Script' {
                     $script:calls++; throw 'boom'
                 } } | Should -Throw
             $script:calls | Should -Be 3
+        }
+
+        It 'Invoke-RetryCommand fails fast on authentication errors (no retry)' {
+            # Auth/authorization failures are structural: retrying with the same token cannot
+            # recover them, so the command must throw on the first attempt without sleeping.
+            $script:calls = 0
+            $script:slept = $false
+            Mock -CommandName Start-Sleep -MockWith { $script:slept = $true }
+            { Invoke-RetryCommand -OperationName 'auth' -BaseDelaySeconds 1 -MaxRetries 5 -ScriptBlock {
+                    $script:calls++; throw 'The remote server returned an error: (401) Unauthorized.'
+                } } | Should -Throw
+            $script:calls | Should -Be 1
+            $script:slept | Should -BeFalse
+        }
+
+        It 'Invoke-RetryCommand fails fast on access-denied (site permission) errors (no retry)' {
+            # "Attempted to perform an unauthorized operation" is a site-permission problem (not a
+            # transient/token issue): the command must throw on the first attempt without sleeping,
+            # so the per-site handler can classify it as AccessDenied.
+            $script:calls = 0
+            $script:slept = $false
+            Mock -CommandName Start-Sleep -MockWith { $script:slept = $true }
+            { Invoke-RetryCommand -OperationName 'denied' -BaseDelaySeconds 1 -MaxRetries 5 -ScriptBlock {
+                    $script:calls++; throw 'Attempted to perform an unauthorized operation.'
+                } } | Should -Throw
+            $script:calls | Should -Be 1
+            $script:slept | Should -BeFalse
         }
 
         It 'Invoke-RetryCommand honours a Retry-After hint (capped) instead of backoff' {
@@ -972,95 +1001,14 @@ Describe 'SPSCleanVersions Script' {
             Test-IsAuthError -ErrorRecord $auth | Should -BeTrue
             Test-IsAuthError -ErrorRecord $other | Should -BeFalse
         }
-    }
 
-    Context 'Multi-thread orchestration (local only)' {
-
-        BeforeAll {
-            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
-            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
-            $wanted = 'Split-SitesIntoSlices', 'New-WorkerConfig', 'Save-DelegatedTokenFile', 'Get-DelegatedTokenFromFile'
-            $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
-            foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
-        }
-
-        It 'Defines a Threads config property defaulting to 1' {
-            $scriptContent | Should -Match "config.PSObject.Properties\['Threads'\]"
-            $scriptContent | Should -Match '\$Threads = if .* else \{ 1 \}'
-        }
-
-        It 'Runs the orchestrator only for local, multi-thread, multi-site, non-worker runs' {
-            $scriptContent | Should -Match '\$Threads -gt 1 -and -not \$script:IsAzureAutomationRun -and -not \$IsWorker -and @\(\$SiteUrls\)\.Count -gt 1'
-        }
-
-        It 'Spawns child pwsh workers and merges their results' {
-            $scriptContent | Should -Match "Start-Process -FilePath 'pwsh'"
-            $scriptContent | Should -Match 'Add-RunResult -SiteUrl .* -Scope .* -Outcome .* -Detail'
-        }
-
-        It 'Quotes the path arguments passed to the worker pwsh process' {
-            # Regression: Start-Process joins -ArgumentList with spaces, so install/config paths
-            # containing spaces must be quoted or the worker never loads the script/config.
-            $scriptContent | Should -Match "'-File', \('""\{0\}""' -f \`$selfPath\)"
-            $scriptContent | Should -Match "'-ConfigFile', \('""\{0\}""' -f \`$threadConfigPath\)"
-        }
-
-        It 'Records a Failed row for any assigned site a worker did not report' {
-            $scriptContent | Should -Match 'if \(-not \$reportedSites\.Contains\(\$site\)\)'
-            $scriptContent | Should -Match "Add-RunResult -SiteUrl \`$site -Scope .*-Outcome 'Failed'"
-        }
-
-        It 'Removes the shared token file in a finally block' {
-            $scriptContent | Should -Match 'Remove-Item -Path \$tokenFile -Force'
-            # The finally also stops any still-running workers before removing the token.
-            $scriptContent | Should -Match '\$w\.Process\.Kill\(\)'
-        }
-
-        It 'Worker mode authenticates from the shared token file, not interactively' {
-            $scriptContent | Should -Match 'Get-DelegatedTokenFromFile -Path \$WorkerTokenFile'
-            $scriptContent | Should -Match 'elseif \(\$IsWorker\)'
-        }
-
-        It 'Split-SitesIntoSlices splits evenly and drops no site' {
-            $slices = Split-SitesIntoSlices -Sites (1..10 | ForEach-Object { "s$_" }) -Count 3
-            $slices.Count | Should -Be 3
-            ($slices | ForEach-Object { $_.Count }) -join ',' | Should -Be '4,3,3'
-            (@($slices | ForEach-Object { $_ }) | Sort-Object -Unique).Count | Should -Be 10
-        }
-
-        It 'Split-SitesIntoSlices never returns more slices than sites' {
-            $slices = Split-SitesIntoSlices -Sites @('a', 'b') -Count 8
-            $slices.Count | Should -Be 2
-        }
-
-        It 'Split-SitesIntoSlices handles an empty list' {
-            $slices = Split-SitesIntoSlices -Sites @() -Count 4
-            @($slices).Count | Should -Be 0
-        }
-
-        It 'New-WorkerConfig sets the slice, forces Threads=1 and adds worker markers' {
-            $base = [pscustomobject]@{ SiteScope = 'All'; VersionPolicyMode = 'ExpireAfter'; Threads = 4; EnableReport = $true }
-            $wc = New-WorkerConfig -BaseConfig $base -Slice @('https://x/sites/a') -TokenFile '/tmp/t.dat' -ResultsFile '/tmp/r.json'
-            $wc['Threads'] | Should -Be 1
-            $wc['EnableReport'] | Should -Be $false
-            $wc.ContainsKey('SiteScope') | Should -BeFalse
-            $wc['SiteUrls'] | Should -Be @('https://x/sites/a')
-            $wc['_WorkerTokenFile'] | Should -Be '/tmp/t.dat'
-            $wc['_WorkerResultsFile'] | Should -Be '/tmp/r.json'
-            $wc['VersionPolicyMode'] | Should -Be 'ExpireAfter'
-        }
-
-        It 'Token file round-trips through Save/Get' {
-            $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("spscv-token-{0}.dat" -f ([guid]::NewGuid()))
-            try {
-                Save-DelegatedTokenFile -Token 'abc.def.ghi' -Path $tmp
-                Test-Path $tmp | Should -BeTrue
-                Get-DelegatedTokenFromFile -Path $tmp | Should -Be 'abc.def.ghi'
-            }
-            finally {
-                Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue
-                Remove-Item -Path "$tmp.tmp" -Force -ErrorAction SilentlyContinue
-            }
+        It 'Test-IsAccessDeniedError detects site-permission failures and ignores others' {
+            $denied = try { throw 'Attempted to perform an unauthorized operation.' } catch { $_ }
+            $denied2 = try { throw 'Access denied. You do not have permission to perform this action.' } catch { $_ }
+            $throttle = try { throw 'Request was throttled. Retry-After: 30' } catch { $_ }
+            Test-IsAccessDeniedError -ErrorRecord $denied | Should -BeTrue
+            Test-IsAccessDeniedError -ErrorRecord $denied2 | Should -BeTrue
+            Test-IsAccessDeniedError -ErrorRecord $throttle | Should -BeFalse
         }
     }
 
@@ -1082,6 +1030,55 @@ Describe 'SPSCleanVersions Script' {
 
         It 'Should write warnings for failed list updates' {
             $scriptContent | Should -Match 'Write-Warning'
+        }
+
+        It 'Should classify per-site access-denied as a distinct, actionable outcome (not a hard failure)' {
+            # The per-site catch branches on Test-IsAccessDeniedError to emit an actionable warning
+            # (not site collection admin) and records Outcome 'AccessDenied' instead of 'Failed'.
+            $scriptContent | Should -Match 'if \(Test-IsAccessDeniedError -ErrorRecord \$_\)'
+            $scriptContent | Should -Match "Outcome 'AccessDenied'"
+            $scriptContent | Should -Match 'is not a site collection administrator on this site'
+        }
+
+        It 'Should not mask access-denied as drift or as a generic Failed row (re-throw to the per-site handler)' {
+            # Access-denied must bubble up to the single per-site AccessDenied handler rather than
+            # being swallowed by the drift fail-safe, the site-policy apply catch, the Legacy
+            # Set-PnPList catch or the batch-delete catch. Each of those intermediate catches
+            # re-throws when access-denied is detected.
+            $reThrows = ([regex]::Matches($scriptContent, 'if \(Test-IsAccessDeniedError -ErrorRecord \$_\) \{\s*(#[^\r\n]*\r?\n\s*)*throw')).Count
+            $reThrows | Should -BeGreaterOrEqual 4
+            # Invoke-RetryCommand checks access-denied BEFORE the auth branch (so no token-oriented
+            # message is emitted for a permission problem).
+            $idxDenied = $scriptContent.IndexOf('if (Test-IsAccessDeniedError -ErrorRecord $_)')
+            $idxAuth = $scriptContent.IndexOf('if (Test-IsAuthError -ErrorRecord $_)')
+            $idxDenied | Should -BeLessThan $idxAuth
+        }
+
+        It 'Drift read re-throws structural auth failures too (fail-fast preserved, no bogus WouldApply)' {
+            # Test-SiteVersionPolicyDrift must not convert a 401/token failure into "treat as drift"
+            # (which would report WouldApply in a dry run); it re-throws both access-denied and auth.
+            $scriptContent | Should -Match '\(Test-IsAccessDeniedError -ErrorRecord \$_\) -or \(Test-IsAuthError -ErrorRecord \$_\)'
+        }
+
+        It 'Access-denied guidance is authentication-mode-specific (delegated vs app-only)' {
+            # App-only (Azure Automation) has no signed-in user to grant site-admin to, so the
+            # remediation differs from the delegated case. Both the per-site warning and the
+            # end-of-run advisory branch on the run mode.
+            $scriptContent | Should -Match 'app-only principal \(Managed Identity\)'
+            $scriptContent | Should -Match 'Sites\.FullControl\.All'
+            $scriptContent | Should -Match 'the signed-in account is not a site collection administrator on this site'
+        }
+
+        It 'Should surface an end-of-run advisory and count for access-denied sites' {
+            $scriptContent | Should -Match '\$sumAccessDenied = @\(\$script:RunResults \| Where-Object \{ \$_\.Outcome -eq ''AccessDenied'' \}\)\.Count'
+            $scriptContent | Should -Match 'access-denied'
+            $scriptContent | Should -Match 'if \(\$sumAccessDenied -gt 0\) \{'
+        }
+
+        It 'Report styles the AccessDenied outcome (badge + KPI card)' {
+            $scriptContent | Should -Match '\.badge\.AccessDenied\{'
+            $scriptContent | Should -Match 'Access denied</div>'
+            $scriptContent | Should -Match "\`$r\.Outcome -eq 'AccessDenied'"
         }
     }
 }

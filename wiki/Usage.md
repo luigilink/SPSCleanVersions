@@ -52,7 +52,8 @@ Configuration is provided as JSON, from one of two **mutually exclusive** parame
 | `SiteScope` | string | No | `Selected` | `Selected` (process `SiteUrls`) or `All` (enumerate the tenant via `Get-PnPTenantSite`). |
 | `TenantAdminUrl` | string | Conditional | — | SharePoint admin center URL, required when `SiteScope` is `All`. |
 | `SiteFilter` | string | No | — | Server-side `-Filter` for `Get-PnPTenantSite` when `SiteScope` is `All`. |
-| `EnableReport` | boolean | No | `true` | Write a local HTML report to `Results/` (local execution only). |
+| `EnableReport` | boolean | No | `true` | Write a local HTML report to `Results/` (plus a machine-readable `SPSCleanVersions-<timestamp>.json`) — local execution only. |
+| `EnumerateLibraries` | boolean | No | `false` | Site policy modes only. Also list the in-scope document libraries as informative `InScope` rows (adds a `Get-PnPList` per site). |
 | `LogRetentionDays` | integer | No | `180` | Prune `Logs/`/`Results/` files older than N days (local only; `0` disables). |
 
 See the [Configuration](./Configuration) page for the full reference and more examples.
@@ -109,7 +110,14 @@ Set `"SiteScope": "All"` with a `TenantAdminUrl` to enumerate every site collect
 
 ## Error Handling
 
-Ensure the provided credentials have access to the SharePoint Sites.
+The script is designed to process a batch resiliently — one bad site never aborts the run:
+
+- **Permission failures (`AccessDenied`).** For delegated (local/interactive) runs the signed-in account must be a **site collection administrator** on each target site (delegated rights = app scope ∩ user rights). A site the account cannot manage is reported with a dedicated `AccessDenied` outcome and an actionable warning, then **skipped** — the other sites keep processing. The end-of-run summary reports the access-denied count and the HTML report flags those sites. See [Site collection administrator requirement](./Configuration#site-collection-administrator-requirement-delegated-runs).
+- **Throttling (HTTP 429/503).** SharePoint calls are retried automatically, honouring the server `Retry-After` hint (capped at 300s) and otherwise using exponential backoff.
+- **Authentication / token errors.** These are surfaced immediately (not retried, since retrying with the same token cannot recover them) with guidance to check the `ClientId` / app registration.
+- **Other per-site errors** are recorded as `Failed` with the error message in the report, and the run continues.
+
+Ensure the provided identity has access to the SharePoint sites being processed, and review the run summary line (`--- SPSCleanVersions finished: ... ---`) and the HTML report for per-site outcomes.
 
 ## Notes
 

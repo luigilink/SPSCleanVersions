@@ -5,7 +5,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- SPSCleanVersions.ps1
+  - **Single interactive prompt on every platform.** Local runs now sign in **once** before
+    enumerating the tenant and processing sites (previously enumeration and each site could
+    trigger their own prompt). The single interactive connection drives the tenant
+    enumeration (`Get-PnPTenantSite`) directly, and its **SharePoint-audience delegated
+    token** — obtained with `Get-PnPAccessToken -ResourceTypeName SharePoint` and reused per
+    site via `Connect-PnPOnline -AccessToken` — is tenant-wide, so it is valid for every
+    site with no further prompt (including macOS, where per-site `-Interactive` otherwise
+    re-shows the account picker). Requesting the SharePoint resource explicitly is required:
+    the default `Get-PnPAccessToken` returns a Microsoft Graph token, which CSOM SharePoint
+    cmdlets reject.
+  - **Retry fails fast on authentication/authorization errors.** `Invoke-RetryCommand` no
+    longer retries structural 401/auth failures (which cannot be recovered by retrying and
+    only slowed the run with exponential backoff); it surfaces them immediately with
+    actionable guidance.
+
 ### Added
+
+- SPSCleanVersions.ps1
+  - **Actionable "access denied" detection (not a hard failure).** When a site is skipped
+    because the signed-in account is not a **site collection administrator** on it, the run
+    now records a distinct `AccessDenied` outcome with a clear message (delegated permissions
+    are the intersection of the app scope **and** the user's own rights, so a full-control
+    app is useless without site rights), keeps processing the other sites, and prints an
+    end-of-run advisory plus a dedicated count/badge in the HTML report. A future opt-in
+    option will add the site collection admin automatically.
 
 - SPSCleanVersions.ps1
   - **Full reporting: per-library rows and structured columns.** The HTML report now has
@@ -16,18 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     optional `EnumerateLibraries` config property (default `false`) lists the document
     libraries *in scope* (`InScope` rows — informative only, since the policy applies to
     existing libraries via an asynchronous server job with no per-library status; enabling it
-    adds a `Get-PnPList` per site). A machine-readable **`results.json`** is written next to
-    the HTML report for auditing, re-processing (Excel / Power BI) or diffing runs. The
-    multi-thread run carries these fields through the worker → parent merge into the single
-    consolidated report.
-  - **Multi-threading (local only).** New `Threads` config property (default `1` =
-    sequential). When `Threads > 1` on a local run with more than one site, the site list is
-    split across that many child `pwsh` processes that all share the **single** interactive
-    sign-in via a permission-restricted, atomically-refreshed token file (no extra prompts;
-    the parent refreshes the token while workers run so long batches never hit expiry). Each
-    worker writes its results as JSON and the parent merges them into one consolidated HTML
-    report. Azure Automation always runs sequentially. Delegated context is preserved, so
-    existing-libraries policy and `ForceDeleteOldVersions` (storage reclaim) still work.
+    adds a `Get-PnPList` per site). A machine-readable **`SPSCleanVersions-<timestamp>.json`** is
+    written next to the HTML report for auditing, re-processing (Excel / Power BI) or diffing runs.
   - **Throttling-aware retry.** Added `Invoke-RetryCommand` (with `Get-RetryAfterDelay` and
     `Test-IsAuthError`) and wrapped the SharePoint calls (`Get-`/`Set-PnPSiteVersionPolicy`,
     `Get-PnPTenantSite`, `Get-`/`Set-PnPList`, `New-PnPSiteFileVersionBatchDeleteJob`). On
@@ -88,6 +105,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     works and what does not under a Managed Identity runbook (site enumeration, policy
     reads, Legacy mode and new-libraries writes work; existing-libraries writes and force
     delete require a delegated context; no HTML report/transcript in the sandbox).
+  - Add a **"Site collection administrator requirement (delegated runs)"** section
+    explaining that delegated rights are the intersection of the app scope **and** the
+    signed-in user's rights on each site, so the account must be a site collection
+    administrator on every target site (a tenant SharePoint Administrator role is not
+    sufficient by itself). Document the new `AccessDenied` outcome and how to fix it
+    (`Set-PnPTenantSite -Owners`), across Configuration, Getting-Started, Usage, Home and
+    a dedicated Troubleshooting entry.
+  - Document the run resilience (single sign-in with SharePoint delegated-token reuse,
+    throttling-aware retry, fail-fast on auth/permission errors) and the enriched report
+    (`SPSCleanVersions-<timestamp>.json`, `AccessDenied` badge/count, `EnumerateLibraries`).
+- Config
+  - Expand `Config/SPSCleanVersions.example.json` into a full template covering the site
+    version policy modes and all supported properties.
+- SPSCleanVersions.ps1
+  - Add `EnumerateLibraries` to the comment-based help `.PARAMETER InputJson` property list.
 
 ## [3.1.4] - 2026-07-15
 

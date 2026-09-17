@@ -3,9 +3,18 @@
     "https://contoso.sharepoint.com/sites/News",
     "https://contoso.sharepoint.com/sites/HR"
   ],
-  "KeepMajorVersions": 50,
+  "VersionPolicyMode": "ExpireAfter",
+  "ExpireVersionsAfterDays": 365,
+  "KeepMajorVersions": 100,
   "KeepMinorVersions": 0,
+  "ApplyTo": "Both",
+  "SiteScope": "Selected",
+  "TenantAdminUrl": "https://contoso-admin.sharepoint.com",
+  "SiteFilter": "",
   "ClientId": "00000000-0000-0000-0000-000000000000",
   "ForceDeleteOldVersions": false,
-  "DryRun": true
+  "DryRun": true,
+  "EnableReport": true,
+  "EnumerateLibraries": false,
+  "LogRetentionDays": 180
 }

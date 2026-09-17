@@ -26,6 +26,7 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
   "TenantAdminUrl": "<string>",
   "SiteFilter": "<string>",
   "EnableReport": <boolean>,
+  "EnumerateLibraries": <boolean>,
   "LogRetentionDays": <integer>
 }
 ```
@@ -46,10 +47,9 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 | `SiteScope` | string | No | `Selected` | `Selected` processes `SiteUrls`. `All` enumerates **every** site collection in the tenant via `Get-PnPTenantSite`. Site version policy modes only (not `Legacy`). See [Tenant-wide scope](#tenant-wide-scope-sitescope-all). |
 | `TenantAdminUrl` | string | Conditional | — | SharePoint admin center URL (e.g. `https://contoso-admin.sharepoint.com`). **Required** when `SiteScope` is `All`. |
 | `SiteFilter` | string | No | — | Optional server-side `-Filter` passed to `Get-PnPTenantSite` to narrow the enumeration when `SiteScope` is `All` (e.g. `"Url -like 'sales'"`). |
-| `EnableReport` | boolean | No | `true` | Write a local HTML report of the run to `Results/` (plus a machine-readable `results.json` next to it). The report has **Site / Scope / Library / Outcome / Major / Minor / ExpireAfterDays / Detail** columns; Legacy mode reports one row per document library. **Local execution only** — no report is produced when running in Azure Automation. |
+| `EnableReport` | boolean | No | `true` | Write a local HTML report of the run to `Results/` (plus a machine-readable `SPSCleanVersions-<timestamp>.json` next to it). The report has **Site / Scope / Library / Outcome / Major / Minor / ExpireAfterDays / Detail** columns; Legacy mode reports one row per document library. **Local execution only** — no report is produced when running in Azure Automation. |
 | `EnumerateLibraries` | boolean | No | `false` | Site version policy modes only. When `true`, also list the document libraries *in scope* for each site as informative `InScope` rows in the report. The policy applies to existing libraries via an **asynchronous server job**, so these rows carry no per-library Applied/Failed status. Adds a `Get-PnPList` call per site — leave off for large tenant-scale runs. |
 | `LogRetentionDays` | integer | No | `180` | Prune `Logs/` and `Results/` files older than this many days (local only). `0` disables pruning. |
-| `Threads` | integer | No | `1` | **Local only.** Number of parallel worker processes. `1` = sequential (default). `> 1` splits the site list across that many child `pwsh` processes that share the single interactive sign-in via a secured token file, then merges their results into one consolidated HTML report. Capped at 16; high values may trigger SharePoint throttling. Ignored in Azure Automation (always sequential). |
 
 ## Version policy modes
 
@@ -65,9 +65,33 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 
 > **Important:** the site version policy modes require **SharePoint Administrator** privileges and a PnP connection that can call `Set-PnPSiteVersionPolicy`. Applying to **existing** libraries submits a background request that may take time to complete across a large site.
 
-> **Drift-based apply:** in the site version policy modes, the script first reads the current policy with `Get-PnPSiteVersionPolicy` and only calls `Set-PnPSiteVersionPolicy` when it differs from the desired settings (a *drift*). Sites that already match are logged as compliant and skipped. If the current policy cannot be read, the script fails safe and applies the policy anyway.
+> **Drift-based apply:** in the site version policy modes, the script first reads the current policy with `Get-PnPSiteVersionPolicy` and only calls `Set-PnPSiteVersionPolicy` when it differs from the desired settings (a *drift*). Sites that already match are logged as compliant and skipped. If the current policy cannot be read for a *transient* reason, the script fails safe and applies the policy anyway — **except** for a permission failure (*access denied*), which is never masked as drift: the site is recorded as `AccessDenied` and skipped (see [Site collection administrator requirement](#site-collection-administrator-requirement-delegated-runs)).
 
 > **ℹ️ Azure Automation / app-only behaviour:** `Get-PnPSiteVersionPolicy` and `Set-PnPSiteVersionPolicy` are documented as requiring a **delegated** context that is **site collection administrator**. Live testing with a **Managed Identity** (app-only) confirmed that **reads work** — `Get-PnPTenantSite` (for `SiteScope: All`) and `Get-PnPSiteVersionPolicy` (drift detection) both succeed app-only. **Writes** to existing document libraries may still require a delegated context and can fail with *"Attempted to perform an unauthorized operation"*; the script emits a warning in a runbook. If a write fails app-only, run the site version policy modes **interactively / locally** with a SharePoint Administrator account, or use the tenant-level `Set-PnPTenant` settings. The default `Legacy` mode is unaffected.
+
+## Site collection administrator requirement (delegated runs)
+
+For **local / interactive** runs the connection is **delegated**: the effective rights are the
+**intersection** of the app registration's delegated scope (`AllSites.FullControl` /
+`Sites.FullControl.All`) **and** the signed-in user's own rights **on each target site**. A
+full-control app scope is therefore not enough on its own — the signed-in account must also be a
+**site collection administrator** on every site you process. Being a tenant **SharePoint
+Administrator** grants management of the tenant and the admin center, but it does **not** by itself
+grant content access to an arbitrary site collection.
+
+When the account lacks rights on a site, SharePoint returns *"Attempted to perform an unauthorized
+operation"*. The script does **not** treat this as a transient error or as a policy drift: it
+records the site with a dedicated **`AccessDenied`** outcome, prints an actionable warning, and
+**continues with the other sites**. At the end of the run a summary line reports the access-denied
+count and the HTML report flags those sites (orange `AccessDenied` badge). To fix, add the account
+as a **site collection administrator** on the affected sites (SharePoint admin center → *Sites* →
+*Active sites* → select the site → *Membership* → *Site admins*, or `Set-PnPTenantSite -Url <site>
+-Owners <upn>`) and re-run.
+
+> Running as an **app-only** identity (Managed Identity or certificate) removes this
+> intersection — the app itself is the identity — so the site-admin requirement does not apply
+> there. It is specific to delegated (interactive/local) runs. An opt-in option to add the site
+> collection administrator automatically is planned for a future release.
 
 ## Tenant-wide scope (SiteScope: All)
 
@@ -90,12 +114,18 @@ By default (`SiteScope: Selected`) the script only processes the sites listed in
 
 ## Logging and reports
 
-Every run produces a summary of what happened per site (**Applied** / **Skipped** / **Compliant** / **Failed**).
+Every run produces a summary of what happened per site (**Applied** / **WouldApply** / **Skipped** / **Compliant** / **AccessDenied** / **Failed**). The final summary line reports the counts, e.g. `--- SPSCleanVersions finished: N site(s), M result(s) — X would apply, Y skipped/compliant, Z access-denied, W failed ---`.
 
-- **Local execution:** a transcript is written to a `Logs/` folder and a self-contained HTML report (summary cards + a filterable table) to a `Results/` folder, both next to the script. Files older than `LogRetentionDays` (default 180) are pruned automatically. Set `"EnableReport": false` to skip the HTML report.
+- **Local execution:** a transcript is written to a `Logs/` folder and a self-contained HTML report (summary cards + a filterable table) to a `Results/` folder, both next to the script. A machine-readable JSON (`SPSCleanVersions-<timestamp>.json`) is written alongside the HTML. Files older than `LogRetentionDays` (default 180) are pruned automatically. Set `"EnableReport": false` to skip the HTML report.
 - **Azure Automation:** there is no persistent filesystem, so the **HTML report is not produced**. The per-site actions are visible in the job output (`Write-Output`/`Write-Warning`) and the run ends with a summary line (`--- SPSCleanVersions finished: ... ---`).
 
-The report values are HTML-encoded, and a `DryRun` badge is shown when the run is a simulation.
+The report values are HTML-encoded, and a `DryRun` badge is shown when the run is a simulation. Rows with the `Failed` or `AccessDenied` outcome are highlighted so problem sites stand out.
+
+### Resilience: single sign-in, throttling and permission handling
+
+- **Single interactive sign-in.** A local run signs in **once**. That interactive connection drives the tenant enumeration (`Get-PnPTenantSite` for `SiteScope: All`) and its **SharePoint-audience delegated token** is reused for every site, so you are prompted a single time — not once per site — on every platform, including macOS.
+- **Throttling-aware retry.** SharePoint calls are wrapped with a retry that honours the server `Retry-After` hint on HTTP 429/503 (capped at 300s) and otherwise uses exponential backoff — important for tenant-scale runs.
+- **Fail fast on structural errors.** Authentication/token failures and permission (`AccessDenied`) failures are **not** retried (retrying cannot recover them); they are surfaced immediately with actionable guidance, and permission failures are recorded as `AccessDenied` per site (see [Site collection administrator requirement](#site-collection-administrator-requirement-delegated-runs)).
 
 ## Examples
 
@@ -282,3 +312,21 @@ Since v3.0.0 the script auto-strips a single wrapping pair of single quotes and 
 ### Error: `Invalid JSON input ... Invalid property identifier character`
 
 The value contains **curly / smart quotes** (`“ ”`) instead of straight double quotes (`"`), typically after copying from Teams, Outlook, or Word. Retype the double quotes as straight quotes, or paste from a plain-text editor.
+
+### Warning: `Access denied on <site> ... not a site collection administrator` (outcome `AccessDenied`)
+
+A **delegated** run reports this when the signed-in account has no rights on that specific site,
+even though the app registration carries `AllSites.FullControl`: delegated rights are the
+intersection of the app scope **and** the user's rights on the site (see [Site collection
+administrator requirement](#site-collection-administrator-requirement-delegated-runs)). Being a
+tenant SharePoint Administrator is **not** sufficient by itself. The site is skipped (not applied,
+not failed) and the run continues.
+
+**Fix:** add the account as a **site collection administrator** on the affected site(s) and re-run:
+
+```powershell
+Set-PnPTenantSite -Url "https://contoso.sharepoint.com/sites/<site>" -Owners "<upn>"
+```
+
+or via the SharePoint admin center → *Sites* → *Active sites* → select the site → *Membership* →
+*Site admins*.
