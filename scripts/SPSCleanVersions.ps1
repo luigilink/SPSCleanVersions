@@ -462,8 +462,11 @@ function Split-SitesIntoSlices {
 function Save-DelegatedTokenFile {
     <#
         .SYNOPSIS
-        Writes the delegated access token to a file readable only by the current user, using
-        an atomic write (temp + move) so concurrent readers never see a partial file.
+        Writes the delegated access token to a user-only file. Hardens the permissions on an
+        empty file FIRST, verifies them, and only then writes the token — so the secret is
+        never briefly exposed with default permissions. Fails closed (throws, no token
+        written) if the file cannot be locked down. Atomic move so readers never see a
+        partial file.
     #>
     [CmdletBinding()]
     param
@@ -472,10 +475,12 @@ function Save-DelegatedTokenFile {
         [Parameter(Mandatory = $true)] [string] $Path
     )
     $tmp = "$Path.tmp"
-    Set-Content -Path $tmp -Value $Token -Encoding UTF8 -NoNewline -Force -WhatIf:$false
+    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -WhatIf:$false }
+    # 1. Create an EMPTY file, then restrict it before any secret touches disk.
+    $null = New-Item -Path $tmp -ItemType File -Force -WhatIf:$false
+    $hardened = $false
     try {
         if ($IsWindows) {
-            # Restrict to the current user only.
             $acl = Get-Acl -Path $tmp
             $acl.SetAccessRuleProtection($true, $false)
             $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
@@ -483,14 +488,27 @@ function Save-DelegatedTokenFile {
                 'FullControl', 'Allow')
             $acl.AddAccessRule($rule)
             Set-Acl -Path $tmp -AclObject $acl
+            # Verify no inherited/extra identities remain beyond the current user.
+            $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            $others = @((Get-Acl -Path $tmp).Access | Where-Object { $_.IdentityReference.Value -ne $current })
+            $hardened = ($others.Count -eq 0)
         }
         else {
             & chmod 600 $tmp 2>$null
+            # Verify the mode really is user-only (no group/other bits).
+            $mode = (Get-Item -LiteralPath $tmp).UnixMode
+            $hardened = ($mode -match '^.rw-------')
         }
     }
     catch {
-        Write-Verbose "Could not tighten token file permissions: $($_.Exception.Message)"
+        $hardened = $false
     }
+    if (-not $hardened) {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue -WhatIf:$false
+        throw "Refusing to write the shared token: could not restrict permissions on $tmp to the current user only."
+    }
+    # 2. Now write the token into the already-locked-down file, then publish atomically.
+    Set-Content -Path $tmp -Value $Token -Encoding UTF8 -NoNewline -Force -WhatIf:$false
     Move-Item -Path $tmp -Destination $Path -Force -WhatIf:$false
 }
 
@@ -1001,34 +1019,40 @@ if ($Threads -gt 1 -and -not $script:IsAzureAutomationRun -and -not $IsWorker -a
         $tokenFile = Join-Path -Path $runRoot -ChildPath 'token.dat'
         $null = New-Item -Path $runRoot -ItemType Directory -Force -WhatIf:$false
         $selfPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+        $workers = $null
 
         try {
             $slices = Split-SitesIntoSlices -Sites ([string[]]@($SiteUrls)) -Count $Threads
             Save-DelegatedTokenFile -Token (Get-PnPAccessToken -Connection $script:DelegatedAuthConnection) -Path $tokenFile
             Write-Output "Multi-thread: $(@($SiteUrls).Count) site(s) across $($slices.Count) worker process(es)."
 
-            $procList = New-Object System.Collections.Generic.List[object]
-            $resultFiles = New-Object System.Collections.Generic.List[string]
+            # Track each worker with the slice it owns and the file it must produce, so we can
+            # validate coverage and exit codes after the run.
+            $workers = New-Object System.Collections.Generic.List[object]
             for ($i = 0; $i -lt $slices.Count; $i++) {
                 $threadNo = $i + 1
                 $threadFolder = Join-Path -Path $runRoot -ChildPath "Thread$threadNo"
                 $null = New-Item -Path $threadFolder -ItemType Directory -Force -WhatIf:$false
                 $resultsFile = Join-Path -Path $threadFolder -ChildPath 'results.json'
-                $resultFiles.Add($resultsFile)
                 $threadConfigPath = Join-Path -Path $threadFolder -ChildPath 'config.json'
                 $workerCfg = New-WorkerConfig -BaseConfig $config -Slice ([string[]]$slices[$i]) -TokenFile $tokenFile -ResultsFile $resultsFile
                 ($workerCfg | ConvertTo-Json -Depth 10) | Set-Content -Path $threadConfigPath -Encoding UTF8 -Force -WhatIf:$false
+                # Quote the path arguments: Start-Process joins -ArgumentList with spaces and
+                # does not preserve boundaries, so an install/config path containing spaces
+                # would otherwise split and the worker would never load the script/config.
                 $proc = Start-Process -FilePath 'pwsh' -PassThru -WindowStyle Hidden -ArgumentList @(
-                    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $selfPath, '-ConfigFile', $threadConfigPath
+                    '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                    '-File', ('"{0}"' -f $selfPath),
+                    '-ConfigFile', ('"{0}"' -f $threadConfigPath)
                 )
-                $procList.Add($proc)
+                $workers.Add([PSCustomObject]@{ ThreadNo = $threadNo; Process = $proc; Slice = [string[]]$slices[$i]; ResultsFile = $resultsFile })
                 Write-Output "  Worker $threadNo started (PID $($proc.Id)) for $(@($slices[$i]).Count) site(s)."
             }
 
             # Wait for all workers; refresh the shared token file periodically so long runs
             # never hit token expiry (the interactive connection refreshes it silently).
             $lastRefresh = Get-Date
-            while (@($procList | Where-Object { -not $_.HasExited }).Count -gt 0) {
+            while (@($workers | Where-Object { -not $_.Process.HasExited }).Count -gt 0) {
                 Start-Sleep -Seconds 5
                 if (((Get-Date) - $lastRefresh).TotalMinutes -ge 20) {
                     try {
@@ -1041,25 +1065,57 @@ if ($Threads -gt 1 -and -not $script:IsAzureAutomationRun -and -not $IsWorker -a
                 }
             }
 
-            # Merge each worker's results into the run results for the consolidated report.
-            foreach ($rf in $resultFiles) {
-                if (Test-Path -Path $rf) {
+            # Merge each worker's results, then validate exit codes and full slice coverage so
+            # a crashed worker cannot silently drop its whole slice while the report shows OK.
+            foreach ($w in $workers) {
+                $reportedSites = New-Object System.Collections.Generic.HashSet[string]
+                if (Test-Path -Path $w.ResultsFile) {
                     try {
-                        $rows = Get-Content -Path $rf -Raw | ConvertFrom-Json
+                        $rows = Get-Content -Path $w.ResultsFile -Raw | ConvertFrom-Json
                         foreach ($row in @($rows)) {
                             Add-RunResult -SiteUrl ([string]$row.Site) -Scope ([string]$row.Scope) -Outcome ([string]$row.Outcome) -Detail ([string]$row.Detail)
+                            $null = $reportedSites.Add([string]$row.Site)
                         }
                     }
                     catch {
-                        Write-Warning "Could not read worker results '$rf': $($_.Exception.Message)"
+                        Write-Warning "Could not read worker $($w.ThreadNo) results '$($w.ResultsFile)': $($_.Exception.Message)"
                     }
                 }
                 else {
-                    Write-Warning "Worker results file missing: $rf (a worker may have failed to start)."
+                    Write-Warning "Worker $($w.ThreadNo) produced no results file (exit code $($w.Process.ExitCode))."
+                }
+
+                $exitCode = $w.Process.ExitCode
+                if ($exitCode -ne 0) {
+                    Write-Warning "Worker $($w.ThreadNo) exited with code $exitCode."
+                }
+                # Any assigned site that did not produce a row is recorded as a failure so the
+                # consolidated report reflects the incomplete coverage instead of hiding it.
+                foreach ($site in $w.Slice) {
+                    if (-not $reportedSites.Contains($site)) {
+                        Add-RunResult -SiteUrl $site -Scope "Thread$($w.ThreadNo)" -Outcome 'Failed' `
+                            -Detail "No result reported by worker $($w.ThreadNo) (exit code $exitCode); the site may not have been processed."
+                    }
                 }
             }
         }
         finally {
+            # On an exceptional path (e.g. a later Start-Process threw), stop any workers still
+            # running before removing the shared token, so no orphaned worker keeps changing
+            # sites after the parent has aborted.
+            if ($null -ne $workers) {
+                foreach ($w in $workers) {
+                    try {
+                        if ($w.Process -and -not $w.Process.HasExited) {
+                            $w.Process.Kill()
+                            $w.Process.WaitForExit(10000) | Out-Null
+                        }
+                    }
+                    catch {
+                        Write-Verbose "Could not stop worker $($w.ThreadNo): $($_.Exception.Message)"
+                    }
+                }
+            }
             if (Test-Path -Path $tokenFile) { Remove-Item -Path $tokenFile -Force -ErrorAction SilentlyContinue -WhatIf:$false }
         }
     }

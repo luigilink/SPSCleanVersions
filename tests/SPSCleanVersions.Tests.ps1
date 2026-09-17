@@ -940,8 +940,22 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'Add-RunResult -SiteUrl .* -Scope .* -Outcome .* -Detail'
         }
 
+        It 'Quotes the path arguments passed to the worker pwsh process' {
+            # Regression: Start-Process joins -ArgumentList with spaces, so install/config paths
+            # containing spaces must be quoted or the worker never loads the script/config.
+            $scriptContent | Should -Match "'-File', \('""\{0\}""' -f \`$selfPath\)"
+            $scriptContent | Should -Match "'-ConfigFile', \('""\{0\}""' -f \`$threadConfigPath\)"
+        }
+
+        It 'Records a Failed row for any assigned site a worker did not report' {
+            $scriptContent | Should -Match 'if \(-not \$reportedSites\.Contains\(\$site\)\)'
+            $scriptContent | Should -Match "Add-RunResult -SiteUrl \`$site -Scope .*-Outcome 'Failed'"
+        }
+
         It 'Removes the shared token file in a finally block' {
-            $scriptContent | Should -Match 'finally\s*\{[^}]*Remove-Item -Path \$tokenFile'
+            $scriptContent | Should -Match 'Remove-Item -Path \$tokenFile -Force'
+            # The finally also stops any still-running workers before removing the token.
+            $scriptContent | Should -Match '\$w\.Process\.Kill\(\)'
         }
 
         It 'Worker mode authenticates from the shared token file, not interactively' {
