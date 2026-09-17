@@ -622,6 +622,7 @@ function Export-SPSCleanVersionsReport {
 
     $rows = @($Results)
     $total = $rows.Count
+    $distinctSites = @($rows | Where-Object { $_.Site } | Select-Object -ExpandProperty Site -Unique).Count
     $applied = @($rows | Where-Object { $_.Outcome -eq 'Applied' }).Count
     $wouldApply = @($rows | Where-Object { $_.Outcome -eq 'WouldApply' }).Count
     $skipped = @($rows | Where-Object { $_.Outcome -eq 'Skipped' -or $_.Outcome -eq 'Compliant' }).Count
@@ -694,7 +695,8 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
 </header>
 <div class="layout">
   <div class="cards">
-    <div class="card"><div class="card-value">$total</div><div class="card-label">Sites processed</div></div>
+    <div class="card"><div class="card-value">$distinctSites</div><div class="card-label">Sites processed</div></div>
+    <div class="card"><div class="card-value">$total</div><div class="card-label">Results (rows)</div></div>
     <div class="card"><div class="card-value">$appliedValue</div><div class="card-label">$appliedLabel</div></div>
     <div class="card"><div class="card-value">$skipped</div><div class="card-label">Skipped / compliant</div></div>
     <div class="$failedCardClass"><div class="card-value">$failed</div><div class="card-label">Failed</div></div>
@@ -747,6 +749,7 @@ if (-not $script:IsAzureAutomationRun) {
     }
     Clear-OldRunFiles -Path $script:LogsFolder -Retention $LogRetentionDays -Filter '*.log'
     Clear-OldRunFiles -Path $script:ResultsFolder -Retention $LogRetentionDays -Filter '*.html'
+    Clear-OldRunFiles -Path $script:ResultsFolder -Retention $LogRetentionDays -Filter '*.json'
     try {
         $transcriptPath = Join-Path -Path $script:LogsFolder -ChildPath ("SPSCleanVersions-$($script:RunTimestamp).log")
         Start-Transcript -Path $transcriptPath -IncludeInvocationHeader -WhatIf:$false | Out-Null
@@ -1221,6 +1224,14 @@ foreach ($SiteUrl in $(if ($script:RunAsOrchestrator) { @() } else { $SiteUrls }
                     else {
                         $p.EnableMinorVersions = $false
                     }
+                    # Keep the ShouldProcess gate so -Confirm is honoured per library. DryRun is
+                    # handled above via $WhatIfPreference; here we only reach the real mutation.
+                    if (-not $PSCmdlet.ShouldProcess($list.Title, 'Set versioning policy')) {
+                        Write-Output "`t$($list.Title) -> change declined (not confirmed); skipped."
+                        Add-RunResult -SiteUrl $SiteUrl -Scope 'Legacy' -Library $list.Title -Outcome 'Skipped' `
+                            -Major "$KeepMajorVersions" -Minor $minorReported -Detail 'Change declined at confirmation prompt.'
+                        continue
+                    }
                     try {
                         Invoke-RetryCommand -OperationName "Set-PnPList ($($list.Title))" -ScriptBlock { Set-PnPList @p -ErrorAction Stop }
                         Write-Output "`t$($list.Title) -> Major=$KeepMajorVersions; MinorEnabled=$minorDesired; MinorLimit=$KeepMinorVersions"
@@ -1303,8 +1314,10 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
                     # site version policy applies to existing libraries via an ASYNCHRONOUS
                     # server job, so there is no per-library Applied/Failed outcome here — these
                     # rows list what is in scope (Outcome = InScope). Off by default because it
-                    # adds a Get-PnPList call per site, which is costly at tenant scale.
-                    if ($EnumerateLibraries) {
+                    # adds a Get-PnPList call per site, which is costly at tenant scale. Only
+                    # meaningful when the EFFECTIVE target includes existing libraries (skip it
+                    # for a New-only target, e.g. an app-only Both->New downgrade).
+                    if ($EnumerateLibraries -and ($effectiveApplyTo -eq 'Both' -or $effectiveApplyTo -eq 'Existing')) {
                         try {
                             $libs = Invoke-RetryCommand -OperationName 'Get-PnPList (enumerate)' -ScriptBlock { Get-PnPList -ErrorAction Stop }
                             $docLibs = @($libs | Where-Object { $_.BaseTemplate -eq 101 -and -not $_.Hidden })
@@ -1393,11 +1406,16 @@ if ($EnableReport -and -not $script:IsAzureAutomationRun -and $script:RunResults
     catch {
         Write-Warning "Unable to write HTML report: $($_.Exception.Message)"
     }
-    # Also emit a machine-readable JSON of the same results, next to the HTML, for auditing,
-    # re-processing (Excel/Power BI), or diffing runs.
+}
+
+# Emit a machine-readable JSON of the results next to the HTML, for auditing, re-processing
+# (Excel/Power BI) or diffing. Written for any local run with EnableReport (independently of
+# the HTML report's non-empty gate, so an empty run still produces a valid [] file).
+if ($EnableReport -and -not $script:IsAzureAutomationRun -and -not $IsWorker) {
     try {
         $jsonPath = Join-Path -Path $script:ResultsFolder -ChildPath ("SPSCleanVersions-$($script:RunTimestamp).json")
-        # See note above: use .ToArray() rather than @($List) | ConvertTo-Json.
+        # Use .ToArray() rather than @($List) | ConvertTo-Json (which throws "Argument types
+        # do not match" on recent PowerShell).
         $jsonRows = $script:RunResults.ToArray()
         $jsonPayload = if ($jsonRows.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $jsonRows -Depth 6 }
         Set-Content -Path $jsonPath -Value $jsonPayload -Encoding UTF8 -Force -WhatIf:$false

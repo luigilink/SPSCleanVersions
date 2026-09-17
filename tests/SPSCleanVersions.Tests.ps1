@@ -757,7 +757,8 @@ Describe 'SPSCleanVersions Script' {
 
         It 'Site-policy mode can enumerate in-scope libraries when EnumerateLibraries is set' {
             $scriptContent | Should -Match "config.PSObject.Properties\['EnumerateLibraries'\]"
-            $scriptContent | Should -Match 'if \(\$EnumerateLibraries\)'
+            # Only enumerate when the effective target actually includes existing libraries.
+            $scriptContent | Should -Match '\$EnumerateLibraries -and \(\$effectiveApplyTo -eq ''Both'' -or \$effectiveApplyTo -eq ''Existing''\)'
             $scriptContent | Should -Match "-Outcome 'InScope'"
         }
 
@@ -768,6 +769,19 @@ Describe 'SPSCleanVersions Script' {
             # .ToArray() / -InputObject, never `@($List) | ConvertTo-Json`.
             $scriptContent | Should -Match 'ConvertTo-Json -InputObject \$jsonRows'
             $scriptContent | Should -Not -Match '@\(\$script:RunResults\) \| ConvertTo-Json'
+            # JSON emission is outside the non-empty HTML gate (empty run still yields []).
+            $scriptContent | Should -Match "if \(\`$EnableReport -and -not \`$script:IsAzureAutomationRun -and -not \`$IsWorker\)"
+            # results.json is covered by retention pruning.
+            $scriptContent | Should -Match "Clear-OldRunFiles -Path \`$script:ResultsFolder -Retention \`$LogRetentionDays -Filter '\*\.json'"
+        }
+
+        It 'Legacy real-mutation path keeps the ShouldProcess (-Confirm) gate' {
+            $scriptContent | Should -Match "ShouldProcess\(\`$list\.Title, 'Set versioning policy'\)"
+        }
+
+        It 'HTML report card counts distinct sites, not rows' {
+            $scriptContent | Should -Match '\$distinctSites = @\(\$rows'
+            $scriptContent | Should -Match '<div class="card-value">\$distinctSites</div><div class="card-label">Sites processed</div>'
         }
 
         It 'Multi-thread merge carries the structured fields back from workers' {
