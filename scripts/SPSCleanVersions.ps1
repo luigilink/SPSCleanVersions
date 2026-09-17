@@ -254,6 +254,24 @@ if ($SiteScope -eq 'All' -and $VersionPolicyMode -eq 'Legacy') {
 # Reporting / logging properties.
 [bool]$EnableReport      = if ($config.PSObject.Properties['EnableReport'])     { $config.EnableReport }     else { $true }
 [int]$LogRetentionDays   = if ($config.PSObject.Properties['LogRetentionDays']) { $config.LogRetentionDays } else { 180 }
+
+# Multi-threading (local only). Threads > 1 splits the site list across that many child
+# pwsh processes, all sharing a single delegated sign-in via a secured token file. Default
+# 1 = the classic sequential behaviour. Azure Automation always runs sequentially.
+[int]$Threads = if ($config.PSObject.Properties['Threads']) { [int]$config.Threads } else { 1 }
+if ($Threads -lt 1) { $Threads = 1 }
+if ($Threads -gt 16) {
+    Write-Warning "Threads=$Threads is high and may trigger SharePoint throttling; capping at 16."
+    $Threads = 16
+}
+
+# Internal worker-mode markers (set by the orchestrator when it spawns child processes;
+# never set them by hand). Their presence puts this invocation in worker mode: it skips the
+# interactive sign-in, authenticates each site from the shared token file, and writes its
+# results as JSON for the parent to merge.
+[string]$WorkerTokenFile   = if ($config.PSObject.Properties['_WorkerTokenFile'])   { [string]$config._WorkerTokenFile }   else { '' }
+[string]$WorkerResultsFile = if ($config.PSObject.Properties['_WorkerResultsFile']) { [string]$config._WorkerResultsFile } else { '' }
+[bool]$IsWorker = -not [string]::IsNullOrWhiteSpace($WorkerTokenFile)
 #endregion
 
 # When DryRun is specified, enable WhatIf mode so that ShouldProcess calls are simulated.
@@ -400,6 +418,150 @@ function Invoke-RetryCommand {
             Start-Sleep -Seconds $delay
         }
     } while ($attempt -le $MaxRetries)
+}
+#endregion
+
+#region --- Multi-thread orchestration (local only) ---
+# For large local runs the site list can be processed by several child pwsh processes in
+# parallel. All children share a SINGLE delegated sign-in: the parent signs in once, writes
+# the access token to a permission-restricted temp file, and each child reads it to connect
+# with -AccessToken (no extra prompts). The parent refreshes the token file while the
+# children run so long batches never hit expiry. Multi-threading is LOCAL ONLY — Azure
+# Automation always runs sequentially.
+
+function Split-SitesIntoSlices {
+    <#
+        .SYNOPSIS
+        Splits a list of site URLs into (at most) $Count contiguous slices, as evenly as
+        possible. Empty slices are never returned.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Collections.IEnumerable])]
+    param
+    (
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]] $Sites,
+        [Parameter(Mandatory = $true)] [ValidateRange(1, 64)] [int] $Count
+    )
+    $total = $Sites.Count
+    if ($total -eq 0) { return @() }
+    $n = [math]::Min($Count, $total)
+    $base = [math]::Floor($total / $n)
+    $remainder = $total % $n
+    $slices = New-Object System.Collections.Generic.List[object]
+    $index = 0
+    for ($i = 0; $i -lt $n; $i++) {
+        # Distribute the remainder one extra item at a time across the first slices.
+        $size = $base + $(if ($i -lt $remainder) { 1 } else { 0 })
+        $slice = [string[]]($Sites[$index..($index + $size - 1)])
+        $slices.Add($slice)
+        $index += $size
+    }
+    return , $slices.ToArray()
+}
+
+function Save-DelegatedTokenFile {
+    <#
+        .SYNOPSIS
+        Writes the delegated access token to a user-only file. Hardens the permissions on an
+        empty file FIRST, verifies them, and only then writes the token — so the secret is
+        never briefly exposed with default permissions. Fails closed (throws, no token
+        written) if the file cannot be locked down. Atomic move so readers never see a
+        partial file.
+    #>
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(Mandatory = $true)] [string] $Token,
+        [Parameter(Mandatory = $true)] [string] $Path
+    )
+    $tmp = "$Path.tmp"
+    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -WhatIf:$false }
+    # 1. Create an EMPTY file, then restrict it before any secret touches disk.
+    $null = New-Item -Path $tmp -ItemType File -Force -WhatIf:$false
+    $hardened = $false
+    try {
+        if ($IsWindows) {
+            $acl = Get-Acl -Path $tmp
+            $acl.SetAccessRuleProtection($true, $false)
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
+                'FullControl', 'Allow')
+            $acl.AddAccessRule($rule)
+            Set-Acl -Path $tmp -AclObject $acl
+            # Verify no inherited/extra identities remain beyond the current user.
+            $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            $others = @((Get-Acl -Path $tmp).Access | Where-Object { $_.IdentityReference.Value -ne $current })
+            $hardened = ($others.Count -eq 0)
+        }
+        else {
+            & chmod 600 $tmp 2>$null
+            # Verify the mode really is user-only (no group/other bits).
+            $mode = (Get-Item -LiteralPath $tmp).UnixMode
+            $hardened = ($mode -match '^.rw-------')
+        }
+    }
+    catch {
+        $hardened = $false
+    }
+    if (-not $hardened) {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue -WhatIf:$false
+        throw "Refusing to write the shared token: could not restrict permissions on $tmp to the current user only."
+    }
+    # 2. Now write the token into the already-locked-down file, then publish atomically.
+    Set-Content -Path $tmp -Value $Token -Encoding UTF8 -NoNewline -Force -WhatIf:$false
+    Move-Item -Path $tmp -Destination $Path -Force -WhatIf:$false
+}
+
+function Get-DelegatedTokenFromFile {
+    <#
+        .SYNOPSIS
+        Reads the delegated access token from the shared token file, tolerating a transient
+        read while the parent atomically refreshes it.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param
+    (
+        [Parameter(Mandatory = $true)] [string] $Path
+    )
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            $value = (Get-Content -Path $Path -Raw -ErrorAction Stop).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+        }
+        catch {
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    throw "Unable to read the shared delegated token file: $Path"
+}
+
+function New-WorkerConfig {
+    <#
+        .SYNOPSIS
+        Builds a per-thread configuration object from the parent config: the original
+        settings, the thread's slice of sites, and the internal worker markers. Threads is
+        forced to 1 so a worker never orchestrates recursively.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param
+    (
+        [Parameter(Mandatory = $true)] $BaseConfig,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]] $Slice,
+        [Parameter(Mandatory = $true)] [string] $TokenFile,
+        [Parameter(Mandatory = $true)] [string] $ResultsFile
+    )
+    $worker = @{}
+    foreach ($p in $BaseConfig.PSObject.Properties) { $worker[$p.Name] = $p.Value }
+    # A worker always processes an explicit list of sites, never re-enumerates the tenant.
+    $worker.Remove('SiteScope') | Out-Null
+    $worker['SiteUrls'] = $Slice
+    $worker['Threads'] = 1
+    $worker['EnableReport'] = $false
+    $worker['_WorkerTokenFile'] = $TokenFile
+    $worker['_WorkerResultsFile'] = $ResultsFile
+    return $worker
 }
 #endregion
 
@@ -822,7 +984,7 @@ if ($SiteScope -eq 'All') {
 # browser prompts over a long run. If the single sign-in fails we fall back to the previous
 # per-site interactive behaviour.
 $script:DelegatedAuthConnection = $null
-if (-not $script:IsAzureAutomationRun -and @($SiteUrls).Count -gt 0) {
+if (-not $script:IsAzureAutomationRun -and -not $IsWorker -and @($SiteUrls).Count -gt 0) {
     if ([string]::IsNullOrWhiteSpace($ClientId)) {
         throw "ClientId is required for local/interactive execution. Register an app once with 'Register-PnPEntraIDAppForInteractiveLogin' and pass its Client ID as the 'ClientId' config property."
     }
@@ -843,7 +1005,123 @@ if (-not $script:IsAzureAutomationRun -and @($SiteUrls).Count -gt 0) {
     }
 }
 
-foreach ($SiteUrl in $SiteUrls) {
+# --- Multi-thread orchestration (local only) ---
+# When Threads > 1 for a local run with more than one site, split the work across child pwsh
+# processes that share this single sign-in via a secured token file, then merge their results.
+$script:RunAsOrchestrator = $false
+if ($Threads -gt 1 -and -not $script:IsAzureAutomationRun -and -not $IsWorker -and @($SiteUrls).Count -gt 1) {
+    if ($null -eq $script:DelegatedAuthConnection) {
+        Write-Warning "Multi-threading requires the single interactive sign-in, which is not available; falling back to sequential processing."
+    }
+    else {
+        $script:RunAsOrchestrator = $true
+        $runRoot = Join-Path -Path $script:ResultsFolder -ChildPath "multithread-$($script:RunTimestamp)"
+        $tokenFile = Join-Path -Path $runRoot -ChildPath 'token.dat'
+        $null = New-Item -Path $runRoot -ItemType Directory -Force -WhatIf:$false
+        $selfPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+        $workers = $null
+
+        try {
+            $slices = Split-SitesIntoSlices -Sites ([string[]]@($SiteUrls)) -Count $Threads
+            Save-DelegatedTokenFile -Token (Get-PnPAccessToken -Connection $script:DelegatedAuthConnection) -Path $tokenFile
+            Write-Output "Multi-thread: $(@($SiteUrls).Count) site(s) across $($slices.Count) worker process(es)."
+
+            # Track each worker with the slice it owns and the file it must produce, so we can
+            # validate coverage and exit codes after the run.
+            $workers = New-Object System.Collections.Generic.List[object]
+            for ($i = 0; $i -lt $slices.Count; $i++) {
+                $threadNo = $i + 1
+                $threadFolder = Join-Path -Path $runRoot -ChildPath "Thread$threadNo"
+                $null = New-Item -Path $threadFolder -ItemType Directory -Force -WhatIf:$false
+                $resultsFile = Join-Path -Path $threadFolder -ChildPath 'results.json'
+                $threadConfigPath = Join-Path -Path $threadFolder -ChildPath 'config.json'
+                $workerCfg = New-WorkerConfig -BaseConfig $config -Slice ([string[]]$slices[$i]) -TokenFile $tokenFile -ResultsFile $resultsFile
+                ($workerCfg | ConvertTo-Json -Depth 10) | Set-Content -Path $threadConfigPath -Encoding UTF8 -Force -WhatIf:$false
+                # Quote the path arguments: Start-Process joins -ArgumentList with spaces and
+                # does not preserve boundaries, so an install/config path containing spaces
+                # would otherwise split and the worker would never load the script/config.
+                $proc = Start-Process -FilePath 'pwsh' -PassThru -WindowStyle Hidden -ArgumentList @(
+                    '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                    '-File', ('"{0}"' -f $selfPath),
+                    '-ConfigFile', ('"{0}"' -f $threadConfigPath)
+                )
+                $workers.Add([PSCustomObject]@{ ThreadNo = $threadNo; Process = $proc; Slice = [string[]]$slices[$i]; ResultsFile = $resultsFile })
+                Write-Output "  Worker $threadNo started (PID $($proc.Id)) for $(@($slices[$i]).Count) site(s)."
+            }
+
+            # Wait for all workers; refresh the shared token file periodically so long runs
+            # never hit token expiry (the interactive connection refreshes it silently).
+            $lastRefresh = Get-Date
+            while (@($workers | Where-Object { -not $_.Process.HasExited }).Count -gt 0) {
+                Start-Sleep -Seconds 5
+                if (((Get-Date) - $lastRefresh).TotalMinutes -ge 20) {
+                    try {
+                        Save-DelegatedTokenFile -Token (Get-PnPAccessToken -Connection $script:DelegatedAuthConnection) -Path $tokenFile
+                        $lastRefresh = Get-Date
+                    }
+                    catch {
+                        Write-Warning "Token refresh failed: $($_.Exception.Message)"
+                    }
+                }
+            }
+
+            # Merge each worker's results, then validate exit codes and full slice coverage so
+            # a crashed worker cannot silently drop its whole slice while the report shows OK.
+            foreach ($w in $workers) {
+                $reportedSites = New-Object System.Collections.Generic.HashSet[string]
+                if (Test-Path -Path $w.ResultsFile) {
+                    try {
+                        $rows = Get-Content -Path $w.ResultsFile -Raw | ConvertFrom-Json
+                        foreach ($row in @($rows)) {
+                            Add-RunResult -SiteUrl ([string]$row.Site) -Scope ([string]$row.Scope) -Outcome ([string]$row.Outcome) -Detail ([string]$row.Detail)
+                            $null = $reportedSites.Add([string]$row.Site)
+                        }
+                    }
+                    catch {
+                        Write-Warning "Could not read worker $($w.ThreadNo) results '$($w.ResultsFile)': $($_.Exception.Message)"
+                    }
+                }
+                else {
+                    Write-Warning "Worker $($w.ThreadNo) produced no results file (exit code $($w.Process.ExitCode))."
+                }
+
+                $exitCode = $w.Process.ExitCode
+                if ($exitCode -ne 0) {
+                    Write-Warning "Worker $($w.ThreadNo) exited with code $exitCode."
+                }
+                # Any assigned site that did not produce a row is recorded as a failure so the
+                # consolidated report reflects the incomplete coverage instead of hiding it.
+                foreach ($site in $w.Slice) {
+                    if (-not $reportedSites.Contains($site)) {
+                        Add-RunResult -SiteUrl $site -Scope "Thread$($w.ThreadNo)" -Outcome 'Failed' `
+                            -Detail "No result reported by worker $($w.ThreadNo) (exit code $exitCode); the site may not have been processed."
+                    }
+                }
+            }
+        }
+        finally {
+            # On an exceptional path (e.g. a later Start-Process threw), stop any workers still
+            # running before removing the shared token, so no orphaned worker keeps changing
+            # sites after the parent has aborted.
+            if ($null -ne $workers) {
+                foreach ($w in $workers) {
+                    try {
+                        if ($w.Process -and -not $w.Process.HasExited) {
+                            $w.Process.Kill()
+                            $w.Process.WaitForExit(10000) | Out-Null
+                        }
+                    }
+                    catch {
+                        Write-Verbose "Could not stop worker $($w.ThreadNo): $($_.Exception.Message)"
+                    }
+                }
+            }
+            if (Test-Path -Path $tokenFile) { Remove-Item -Path $tokenFile -Force -ErrorAction SilentlyContinue -WhatIf:$false }
+        }
+    }
+}
+
+foreach ($SiteUrl in $(if ($script:RunAsOrchestrator) { @() } else { $SiteUrls })) {
     Write-Output "Processing Site: $SiteUrl"
 
     try {
@@ -856,6 +1134,12 @@ foreach ($SiteUrl in $SiteUrls) {
             else {
                 Connect-PnPOnline -Url $SiteUrl -ManagedIdentity
             }
+        }
+        elseif ($IsWorker) {
+            # Worker process: authenticate each site from the shared token file (re-read every
+            # site so parent token refreshes are picked up). No interactive prompt.
+            $accessToken = Get-DelegatedTokenFromFile -Path $WorkerTokenFile
+            Connect-PnPOnline -Url $SiteUrl -AccessToken $accessToken
         }
         else {
             if ($null -ne $script:DelegatedAuthConnection) {
@@ -1025,6 +1309,19 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
 }
 
 #region --- Report output ---
+# Worker processes do not write an HTML report; they hand their results back to the parent
+# as JSON, which the orchestrator merges and renders into the single consolidated report.
+if ($IsWorker) {
+    try {
+        $payload = @($script:RunResults) | ConvertTo-Json -Depth 6
+        if ([string]::IsNullOrWhiteSpace($payload)) { $payload = '[]' }
+        Set-Content -Path $WorkerResultsFile -Value $payload -Encoding UTF8 -Force -WhatIf:$false
+    }
+    catch {
+        Write-Warning "Worker could not write its results file '$WorkerResultsFile': $($_.Exception.Message)"
+    }
+}
+
 # The HTML report is a local artifact only. In Azure Automation there is no persistent
 # filesystem and dumping the HTML into the job output stream makes the log unreadable, so
 # the report is simply not produced there (the run summary below is still printed).

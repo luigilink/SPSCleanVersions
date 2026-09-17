@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - SPSCleanVersions.ps1
+  - **Multi-threading (local only).** New `Threads` config property (default `1` =
+    sequential). When `Threads > 1` on a local run with more than one site, the site list is
+    split across that many child `pwsh` processes that all share the **single** interactive
+    sign-in via a permission-restricted, atomically-refreshed token file (no extra prompts;
+    the parent refreshes the token while workers run so long batches never hit expiry). Each
+    worker writes its results as JSON and the parent merges them into one consolidated HTML
+    report. Azure Automation always runs sequentially. Delegated context is preserved, so
+    existing-libraries policy and `ForceDeleteOldVersions` (storage reclaim) still work.
   - **Throttling-aware retry.** Added `Invoke-RetryCommand` (with `Get-RetryAfterDelay` and
     `Test-IsAuthError`) and wrapped the SharePoint calls (`Get-`/`Set-PnPSiteVersionPolicy`,
     `Get-PnPTenantSite`, `Get-`/`Set-PnPList`, `New-PnPSiteFileVersionBatchDeleteJob`). On
