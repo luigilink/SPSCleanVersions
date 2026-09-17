@@ -5,6 +5,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- SPSCleanVersions.ps1
+  - **Single interactive prompt for `SiteScope: All`.** Local runs now sign in **once**
+    before enumerating the tenant and reuse that same delegated connection for both the
+    enumeration (`Get-PnPTenantSite`) and every site. Previously the enumeration and the
+    per-site processing each triggered their own interactive sign-in (two prompts). The tenant
+    admin center is used as the sign-in anchor for `SiteScope: All`; the delegated SharePoint
+    token is tenant-wide, so one connection serves enumeration and all sites.
+
 ### Added
 
 - SPSCleanVersions.ps1
@@ -17,17 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     libraries *in scope* (`InScope` rows — informative only, since the policy applies to
     existing libraries via an asynchronous server job with no per-library status; enabling it
     adds a `Get-PnPList` per site). A machine-readable **`results.json`** is written next to
-    the HTML report for auditing, re-processing (Excel / Power BI) or diffing runs. The
-    multi-thread run carries these fields through the worker → parent merge into the single
-    consolidated report.
-  - **Multi-threading (local only).** New `Threads` config property (default `1` =
-    sequential). When `Threads > 1` on a local run with more than one site, the site list is
-    split across that many child `pwsh` processes that all share the **single** interactive
-    sign-in via a permission-restricted, atomically-refreshed token file (no extra prompts;
-    the parent refreshes the token while workers run so long batches never hit expiry). Each
-    worker writes its results as JSON and the parent merges them into one consolidated HTML
-    report. Azure Automation always runs sequentially. Delegated context is preserved, so
-    existing-libraries policy and `ForceDeleteOldVersions` (storage reclaim) still work.
+    the HTML report for auditing, re-processing (Excel / Power BI) or diffing runs.
   - **Throttling-aware retry.** Added `Invoke-RetryCommand` (with `Get-RetryAfterDelay` and
     `Test-IsAuthError`) and wrapped the SharePoint calls (`Get-`/`Set-PnPSiteVersionPolicy`,
     `Get-PnPTenantSite`, `Get-`/`Set-PnPList`, `New-PnPSiteFileVersionBatchDeleteJob`). On

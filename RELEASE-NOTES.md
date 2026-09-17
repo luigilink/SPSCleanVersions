@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- SPSCleanVersions.ps1
+  - **Single interactive prompt for `SiteScope: All`** — sign in once before enumerating the
+    tenant and reuse that connection for enumeration and every site (was two prompts).
+
 ### Added
 
 - SPSCleanVersions.ps1
@@ -10,10 +16,6 @@
     version policy modes can list in-scope libraries via an optional `EnumerateLibraries`
     flag (informative `InScope` rows); and a machine-readable **`results.json`** is written
     next to the HTML report.
-  - **Multi-threading (local only)** via a new `Threads` config property (default `1`).
-    `Threads > 1` splits the site list across that many child `pwsh` processes sharing the
-    single interactive sign-in through a secured, auto-refreshed token file; workers' results
-    are merged into one consolidated HTML report. Azure Automation stays sequential.
   - **Throttling-aware retry** (`Invoke-RetryCommand` + `Get-RetryAfterDelay` +
     `Test-IsAuthError`) around the SharePoint calls: HTTP 429/503 responses honour the
     server `Retry-After` hint (capped at 300s), otherwise exponential backoff. Adapted (MIT)

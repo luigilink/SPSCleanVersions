@@ -266,8 +266,8 @@ Describe 'SPSCleanVersions Script' {
 
     Context 'Core logic patterns' {
 
-        It 'Should iterate over SiteUrls with foreach (skipped when orchestrating)' {
-            $scriptContent | Should -Match 'foreach\s*\(\$SiteUrl\s+in\s+\$\(if\s*\(\$script:RunAsOrchestrator\)'
+        It 'Should iterate over SiteUrls with foreach' {
+            $scriptContent | Should -Match 'foreach\s*\(\$SiteUrl\s+in\s+\$SiteUrls\)'
         }
 
         It 'Should connect to PnP Online' {
@@ -338,11 +338,9 @@ Describe 'SPSCleanVersions Script' {
         }
     }
 
-    Context 'Local batch authentication (token reuse)' {
+    Context 'Local single sign-in (token reuse)' {
 
         It 'Should establish a single delegated connection before the site loop' {
-            # #37: sign in once and reuse the token, instead of Connect-PnPOnline -Interactive
-            # per site (which re-prompts for a browser login on every site in a batch).
             $scriptContent | Should -Match '\$script:DelegatedAuthConnection'
             $scriptContent | Should -Match 'Connect-PnPOnline\s+-Url\s+\$anchorUrl\s+-Interactive\s+-ClientId\s+\$ClientId\s+-ReturnConnection'
         }
@@ -352,8 +350,8 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'Connect-PnPOnline\s+-Url\s+\$SiteUrl\s+-AccessToken\s+\$accessToken'
         }
 
-        It 'Should fall back to per-site interactive login when the single sign-in fails' {
-            $scriptContent | Should -Match 'Falling back to interactive login per site'
+        It 'Should fall back to per-operation interactive login when the single sign-in fails' {
+            $scriptContent | Should -Match 'Falling back to interactive login per operation'
             $scriptContent | Should -Match 'Connect-PnPOnline\s+-Url\s+\$SiteUrl\s+-Interactive\s+-ClientId\s+\$ClientId'
         }
 
@@ -361,8 +359,15 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match "ClientId is required for local/interactive execution"
         }
 
-        It 'Should not attempt the single sign-in in Azure Automation or worker mode' {
-            $scriptContent | Should -Match '-not \$script:IsAzureAutomationRun -and -not \$IsWorker -and @\(\$SiteUrls\)\.Count -gt 0'
+        It 'Should not attempt the single sign-in in Azure Automation' {
+            $scriptContent | Should -Match 'if \(-not \$script:IsAzureAutomationRun\) \{'
+        }
+
+        It 'Should sign in before tenant enumeration and reuse the connection for it (single prompt)' {
+            # Sign-in happens before the SiteScope=All enumeration and the connection is passed
+            # to Get-TenantSiteUrls so enumeration does not trigger a second interactive prompt.
+            $scriptContent | Should -Match 'Get-TenantSiteUrls -AdminUrl \$TenantAdminUrl -Filter \$SiteFilter -ClientId \$ClientId -Connection \$script:DelegatedAuthConnection'
+            $scriptContent | Should -Match 'if \(\$null -ne \$Connection\) \{ \$getParams\[''Connection''\] = \$Connection \}'
         }
     }
 
@@ -770,7 +775,7 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'ConvertTo-Json -InputObject \$jsonRows'
             $scriptContent | Should -Not -Match '@\(\$script:RunResults\) \| ConvertTo-Json'
             # JSON emission is outside the non-empty HTML gate (empty run still yields []).
-            $scriptContent | Should -Match "if \(\`$EnableReport -and -not \`$script:IsAzureAutomationRun -and -not \`$IsWorker\)"
+            $scriptContent | Should -Match "if \(\`$EnableReport -and -not \`$script:IsAzureAutomationRun\) \{"
             # results.json is covered by retention pruning.
             $scriptContent | Should -Match "Clear-OldRunFiles -Path \`$script:ResultsFolder -Retention \`$LogRetentionDays -Filter '\*\.json'"
         }
@@ -782,11 +787,6 @@ Describe 'SPSCleanVersions Script' {
         It 'HTML report card counts distinct sites, not rows' {
             $scriptContent | Should -Match '\$distinctSites = @\(\$rows'
             $scriptContent | Should -Match '<div class="card-value">\$distinctSites</div><div class="card-label">Sites processed</div>'
-        }
-
-        It 'Multi-thread merge carries the structured fields back from workers' {
-            $scriptContent | Should -Match '-Library \(\[string\]\$row\.Library\)'
-            $scriptContent | Should -Match '-ExpireAfterDays \(\[string\]\$row\.ExpireAfterDays\)'
         }
 
         It 'Should start a transcript for local runs' {
@@ -971,96 +971,6 @@ Describe 'SPSCleanVersions Script' {
             $other = try { throw 'file not found' } catch { $_ }
             Test-IsAuthError -ErrorRecord $auth | Should -BeTrue
             Test-IsAuthError -ErrorRecord $other | Should -BeFalse
-        }
-    }
-
-    Context 'Multi-thread orchestration (local only)' {
-
-        BeforeAll {
-            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
-            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
-            $wanted = 'Split-SitesIntoSlices', 'New-WorkerConfig', 'Save-DelegatedTokenFile', 'Get-DelegatedTokenFromFile'
-            $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
-            foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
-        }
-
-        It 'Defines a Threads config property defaulting to 1' {
-            $scriptContent | Should -Match "config.PSObject.Properties\['Threads'\]"
-            $scriptContent | Should -Match '\$Threads = if .* else \{ 1 \}'
-        }
-
-        It 'Runs the orchestrator only for local, multi-thread, multi-site, non-worker runs' {
-            $scriptContent | Should -Match '\$Threads -gt 1 -and -not \$script:IsAzureAutomationRun -and -not \$IsWorker -and @\(\$SiteUrls\)\.Count -gt 1'
-        }
-
-        It 'Spawns child pwsh workers and merges their results' {
-            $scriptContent | Should -Match "Start-Process -FilePath 'pwsh'"
-            $scriptContent | Should -Match 'Add-RunResult -SiteUrl .* -Scope .* -Outcome .* -Detail'
-        }
-
-        It 'Quotes the path arguments passed to the worker pwsh process' {
-            # Regression: Start-Process joins -ArgumentList with spaces, so install/config paths
-            # containing spaces must be quoted or the worker never loads the script/config.
-            $scriptContent | Should -Match "'-File', \('""\{0\}""' -f \`$selfPath\)"
-            $scriptContent | Should -Match "'-ConfigFile', \('""\{0\}""' -f \`$threadConfigPath\)"
-        }
-
-        It 'Records a Failed row for any assigned site a worker did not report' {
-            $scriptContent | Should -Match 'if \(-not \$reportedSites\.Contains\(\$site\)\)'
-            $scriptContent | Should -Match "Add-RunResult -SiteUrl \`$site -Scope .*-Outcome 'Failed'"
-        }
-
-        It 'Removes the shared token file in a finally block' {
-            $scriptContent | Should -Match 'Remove-Item -Path \$tokenFile -Force'
-            # The finally also stops any still-running workers before removing the token.
-            $scriptContent | Should -Match '\$w\.Process\.Kill\(\)'
-        }
-
-        It 'Worker mode authenticates from the shared token file, not interactively' {
-            $scriptContent | Should -Match 'Get-DelegatedTokenFromFile -Path \$WorkerTokenFile'
-            $scriptContent | Should -Match 'elseif \(\$IsWorker\)'
-        }
-
-        It 'Split-SitesIntoSlices splits evenly and drops no site' {
-            $slices = Split-SitesIntoSlices -Sites (1..10 | ForEach-Object { "s$_" }) -Count 3
-            $slices.Count | Should -Be 3
-            ($slices | ForEach-Object { $_.Count }) -join ',' | Should -Be '4,3,3'
-            (@($slices | ForEach-Object { $_ }) | Sort-Object -Unique).Count | Should -Be 10
-        }
-
-        It 'Split-SitesIntoSlices never returns more slices than sites' {
-            $slices = Split-SitesIntoSlices -Sites @('a', 'b') -Count 8
-            $slices.Count | Should -Be 2
-        }
-
-        It 'Split-SitesIntoSlices handles an empty list' {
-            $slices = Split-SitesIntoSlices -Sites @() -Count 4
-            @($slices).Count | Should -Be 0
-        }
-
-        It 'New-WorkerConfig sets the slice, forces Threads=1 and adds worker markers' {
-            $base = [pscustomobject]@{ SiteScope = 'All'; VersionPolicyMode = 'ExpireAfter'; Threads = 4; EnableReport = $true }
-            $wc = New-WorkerConfig -BaseConfig $base -Slice @('https://x/sites/a') -TokenFile '/tmp/t.dat' -ResultsFile '/tmp/r.json'
-            $wc['Threads'] | Should -Be 1
-            $wc['EnableReport'] | Should -Be $false
-            $wc.ContainsKey('SiteScope') | Should -BeFalse
-            $wc['SiteUrls'] | Should -Be @('https://x/sites/a')
-            $wc['_WorkerTokenFile'] | Should -Be '/tmp/t.dat'
-            $wc['_WorkerResultsFile'] | Should -Be '/tmp/r.json'
-            $wc['VersionPolicyMode'] | Should -Be 'ExpireAfter'
-        }
-
-        It 'Token file round-trips through Save/Get' {
-            $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("spscv-token-{0}.dat" -f ([guid]::NewGuid()))
-            try {
-                Save-DelegatedTokenFile -Token 'abc.def.ghi' -Path $tmp
-                Test-Path $tmp | Should -BeTrue
-                Get-DelegatedTokenFromFile -Path $tmp | Should -Be 'abc.def.ghi'
-            }
-            finally {
-                Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue
-                Remove-Item -Path "$tmp.tmp" -Force -ErrorAction SilentlyContinue
-            }
         }
     }
 
