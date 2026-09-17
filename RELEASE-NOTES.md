@@ -26,8 +26,8 @@
   - **Full reporting**: the HTML report gains **Library / Major / Minor / ExpireAfterDays**
     columns; Legacy mode reports one row per document library with its real outcome; site
     version policy modes can list in-scope libraries via an optional `EnumerateLibraries`
-    flag (informative `InScope` rows); and a machine-readable **`results.json`** is written
-    next to the HTML report.
+    flag (informative `InScope` rows); and a machine-readable **`SPSCleanVersions-<timestamp>.json`**
+    is written next to the HTML report.
   - **Throttling-aware retry** (`Invoke-RetryCommand` + `Get-RetryAfterDelay` +
     `Test-IsAuthError`) around the SharePoint calls: HTTP 429/503 responses honour the
     server `Retry-After` hint (capped at 300s), otherwise exponential backoff. Adapted (MIT)

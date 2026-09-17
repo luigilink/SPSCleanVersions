@@ -662,10 +662,11 @@ function Test-SiteVersionPolicyDrift {
         $current = Invoke-RetryCommand -OperationName 'Get-PnPSiteVersionPolicy' -ScriptBlock { Get-PnPSiteVersionPolicy -ErrorAction Stop }
     }
     catch {
-        if (Test-IsAccessDeniedError -ErrorRecord $_) {
-            # Access denied reading the policy = the account lacks rights on this site. Do NOT mask
-            # it as "drift" (which would mis-report the site as WouldApply/Applied); let it bubble
-            # up so the per-site handler records it as AccessDenied and skips the site.
+        if ((Test-IsAccessDeniedError -ErrorRecord $_) -or (Test-IsAuthError -ErrorRecord $_)) {
+            # A permission (access-denied) or structural authentication failure reading the policy
+            # must NOT be masked as "drift" (which would mis-report the site as WouldApply/Applied
+            # and defeat the fail-fast behaviour). Let it bubble up so the per-site handler records
+            # it (AccessDenied for a permission problem, Failed for an auth/token error) and moves on.
             throw
         }
         Write-Verbose "Test-SiteVersionPolicyDrift: unable to read current policy ($($_.Exception.Message)); treating as drift."
@@ -1009,6 +1010,11 @@ foreach ($SiteUrl in $SiteUrls) {
                             -Major "$KeepMajorVersions" -Minor $minorReported -Detail "Set Major=$KeepMajorVersions, Minor=$minorReported"
                     }
                     catch {
+                        if (Test-IsAccessDeniedError -ErrorRecord $_) {
+                            # Let the per-site handler record this as AccessDenied (single source of
+                            # truth) rather than a generic per-library Failed row.
+                            throw
+                        }
                         Write-Warning "`tFAILED $($list.Title): $($_.Exception.Message)"
                         $legacyFailed++
                         Add-RunResult -SiteUrl $SiteUrl -Scope 'Legacy' -Library $list.Title -Outcome 'Failed' `
@@ -1135,6 +1141,11 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                         Write-Output "`tBatch delete job submitted successfully for $SiteUrl"
                     }
                     catch {
+                        if (Test-IsAccessDeniedError -ErrorRecord $_) {
+                            # Surface access-denied through the per-site AccessDenied handler instead
+                            # of a bare warning that leaves no trace in the report/summary.
+                            throw
+                        }
                         Write-Warning "`tFAILED to submit batch delete job for ${SiteUrl}: $($_.Exception.Message)"
                     }
                 }
@@ -1143,14 +1154,22 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
     }
     catch {
         if (Test-IsAccessDeniedError -ErrorRecord $_) {
-            # Access denied on this site: the signed-in account almost always lacks site collection
-            # administrator rights on it. Delegated permissions are the intersection of the app
-            # scope AND the user's own rights, so a full-control app scope is useless when the user
-            # has no rights on the site. This is a setup gap, not a script defect — surface an
-            # actionable warning, record the site as AccessDenied with the reason, and continue.
-            Write-Warning "Access denied on ${SiteUrl}: the signed-in account is not a site collection administrator on this site. Add it as a site collection admin (or, once available, re-run with the AddSiteCollectionAdmin option) and retry. Skipping this site. Original error: $($_.Exception.Message)"
-            Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'AccessDenied' `
-                -Detail 'Access denied: the signed-in account is not a site collection administrator on this site. Grant site admin and retry.'
+            # Access denied on this site. The remediation depends on the authentication mode:
+            #  - Delegated (local/interactive): rights are the intersection of the app scope AND the
+            #    signed-in user's own rights, so the account is almost always missing site collection
+            #    administrator rights on this site — a setup gap, not a script defect.
+            #  - App-only (Azure Automation Managed Identity): there is no signed-in user to grant
+            #    site-admin to; the app principal lacks the required permission or the API is not
+            #    supported app-only. Give mode-appropriate guidance so it is actionable.
+            if (Test-IsAzureAutomation) {
+                $accessDeniedDetail = 'Access denied (app-only): the Managed Identity lacks the required SharePoint permission (Sites.FullControl.All) or the operation is not supported app-only. Run this mode locally/interactively with a site collection administrator.'
+                Write-Warning "Access denied on ${SiteUrl}: the app-only principal (Managed Identity) cannot perform this operation. Ensure it has Sites.FullControl.All, or run this mode locally/interactively with a site collection administrator. Skipping this site. Original error: $($_.Exception.Message)"
+            }
+            else {
+                $accessDeniedDetail = 'Access denied: the signed-in account is not a site collection administrator on this site. Grant site admin and retry.'
+                Write-Warning "Access denied on ${SiteUrl}: the signed-in account is not a site collection administrator on this site. Add it as a site collection admin (or, once available, re-run with the AddSiteCollectionAdmin option) and retry. Skipping this site. Original error: $($_.Exception.Message)"
+            }
+            Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'AccessDenied' -Detail $accessDeniedDetail
         }
         else {
             Write-Error "Failed to process site $SiteUrl : $($_.Exception.Message)"
@@ -1208,7 +1227,12 @@ $distinctSites = @($script:RunResults | Select-Object -ExpandProperty Site -Uniq
 $appliedPart = if ($WhatIfPreference) { "$sumWouldApply would apply" } else { "$sumApplied applied" }
 Write-Output "--- SPSCleanVersions finished: $distinctSites site(s), $($script:RunResults.Count) result(s) — $appliedPart, $sumSkipped skipped/compliant, $sumAccessDenied access-denied, $sumFailed failed ---"
 if ($sumAccessDenied -gt 0) {
-    Write-Warning "$sumAccessDenied site(s) were skipped because the signed-in account is not a site collection administrator on them. Grant site collection admin on those sites (see the report for the list) and re-run."
+    if ($script:IsAzureAutomationRun) {
+        Write-Warning "$sumAccessDenied site(s) were skipped due to access-denied under app-only authentication. Ensure the Managed Identity has the required SharePoint permission (Sites.FullControl.All), or run this mode locally/interactively with a site collection administrator (see the report for the list)."
+    }
+    else {
+        Write-Warning "$sumAccessDenied site(s) were skipped because the signed-in account is not a site collection administrator on them. Grant site collection admin on those sites (see the report for the list) and re-run."
+    }
 }
 
 if ($script:TranscriptStarted) {

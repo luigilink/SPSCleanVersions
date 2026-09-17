@@ -52,7 +52,7 @@ Configuration is provided as JSON, from one of two **mutually exclusive** parame
 | `SiteScope` | string | No | `Selected` | `Selected` (process `SiteUrls`) or `All` (enumerate the tenant via `Get-PnPTenantSite`). |
 | `TenantAdminUrl` | string | Conditional | — | SharePoint admin center URL, required when `SiteScope` is `All`. |
 | `SiteFilter` | string | No | — | Server-side `-Filter` for `Get-PnPTenantSite` when `SiteScope` is `All`. |
-| `EnableReport` | boolean | No | `true` | Write a local HTML report to `Results/` (plus `results.json`) — local execution only. |
+| `EnableReport` | boolean | No | `true` | Write a local HTML report to `Results/` (plus a machine-readable `SPSCleanVersions-<timestamp>.json`) — local execution only. |
 | `EnumerateLibraries` | boolean | No | `false` | Site policy modes only. Also list the in-scope document libraries as informative `InScope` rows (adds a `Get-PnPList` per site). |
 | `LogRetentionDays` | integer | No | `180` | Prune `Logs/`/`Results/` files older than N days (local only; `0` disables). |
 

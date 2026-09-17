@@ -43,8 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     optional `EnumerateLibraries` config property (default `false`) lists the document
     libraries *in scope* (`InScope` rows — informative only, since the policy applies to
     existing libraries via an asynchronous server job with no per-library status; enabling it
-    adds a `Get-PnPList` per site). A machine-readable **`results.json`** is written next to
-    the HTML report for auditing, re-processing (Excel / Power BI) or diffing runs.
+    adds a `Get-PnPList` per site). A machine-readable **`SPSCleanVersions-<timestamp>.json`** is
+    written next to the HTML report for auditing, re-processing (Excel / Power BI) or diffing runs.
   - **Throttling-aware retry.** Added `Invoke-RetryCommand` (with `Get-RetryAfterDelay` and
     `Test-IsAuthError`) and wrapped the SharePoint calls (`Get-`/`Set-PnPSiteVersionPolicy`,
     `Get-PnPTenantSite`, `Get-`/`Set-PnPList`, `New-PnPSiteFileVersionBatchDeleteJob`). On
@@ -114,7 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a dedicated Troubleshooting entry.
   - Document the run resilience (single sign-in with SharePoint delegated-token reuse,
     throttling-aware retry, fail-fast on auth/permission errors) and the enriched report
-    (`results.json`, `AccessDenied` badge/count, `EnumerateLibraries`).
+    (`SPSCleanVersions-<timestamp>.json`, `AccessDenied` badge/count, `EnumerateLibraries`).
 - Config
   - Expand `Config/SPSCleanVersions.example.json` into a full template covering the site
     version policy modes and all supported properties.

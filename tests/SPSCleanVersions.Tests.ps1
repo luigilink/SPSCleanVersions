@@ -1042,15 +1042,31 @@ Describe 'SPSCleanVersions Script' {
 
         It 'Should not mask access-denied as drift or as a generic Failed row (re-throw to the per-site handler)' {
             # Access-denied must bubble up to the single per-site AccessDenied handler rather than
-            # being swallowed by the drift fail-safe ("treat as drift") or the apply catch ("Failed").
-            # Both intermediate catches re-throw when Test-IsAccessDeniedError is true.
+            # being swallowed by the drift fail-safe, the site-policy apply catch, the Legacy
+            # Set-PnPList catch or the batch-delete catch. Each of those intermediate catches
+            # re-throws when access-denied is detected.
             $reThrows = ([regex]::Matches($scriptContent, 'if \(Test-IsAccessDeniedError -ErrorRecord \$_\) \{\s*(#[^\r\n]*\r?\n\s*)*throw')).Count
-            $reThrows | Should -BeGreaterOrEqual 2
+            $reThrows | Should -BeGreaterOrEqual 4
             # Invoke-RetryCommand checks access-denied BEFORE the auth branch (so no token-oriented
             # message is emitted for a permission problem).
             $idxDenied = $scriptContent.IndexOf('if (Test-IsAccessDeniedError -ErrorRecord $_)')
             $idxAuth = $scriptContent.IndexOf('if (Test-IsAuthError -ErrorRecord $_)')
             $idxDenied | Should -BeLessThan $idxAuth
+        }
+
+        It 'Drift read re-throws structural auth failures too (fail-fast preserved, no bogus WouldApply)' {
+            # Test-SiteVersionPolicyDrift must not convert a 401/token failure into "treat as drift"
+            # (which would report WouldApply in a dry run); it re-throws both access-denied and auth.
+            $scriptContent | Should -Match '\(Test-IsAccessDeniedError -ErrorRecord \$_\) -or \(Test-IsAuthError -ErrorRecord \$_\)'
+        }
+
+        It 'Access-denied guidance is authentication-mode-specific (delegated vs app-only)' {
+            # App-only (Azure Automation) has no signed-in user to grant site-admin to, so the
+            # remediation differs from the delegated case. Both the per-site warning and the
+            # end-of-run advisory branch on the run mode.
+            $scriptContent | Should -Match 'app-only principal \(Managed Identity\)'
+            $scriptContent | Should -Match 'Sites\.FullControl\.All'
+            $scriptContent | Should -Match 'the signed-in account is not a site collection administrator on this site'
         }
 
         It 'Should surface an end-of-run advisory and count for access-denied sites' {
