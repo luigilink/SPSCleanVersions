@@ -1,6 +1,6 @@
 # SPSCleanVersions - Release Notes
 
-## [Unreleased]
+## [3.3.0] - 2026-09-29
 
 ### Added
 
