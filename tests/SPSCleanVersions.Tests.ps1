@@ -1016,10 +1016,14 @@ Describe 'SPSCleanVersions Script' {
             $nf2 = try { throw 'The remote server returned an error: (404) Not Found.' } catch { $_ }
             $throttle = try { throw 'Request was throttled. Retry-After: 30' } catch { $_ }
             $applied = try { throw 'Set policy OK' } catch { $_ }
+            # A bare "not found" on an unrelated resource (list/column/certificate) must NOT be
+            # classified as a missing site — only explicit HTTP-status evidence counts.
+            $listNotFound = try { throw 'List ''Documents'' was not found on this site.' } catch { $_ }
             Test-IsNotFoundError -ErrorRecord $nf1 | Should -BeTrue
             Test-IsNotFoundError -ErrorRecord $nf2 | Should -BeTrue
             Test-IsNotFoundError -ErrorRecord $throttle | Should -BeFalse
             Test-IsNotFoundError -ErrorRecord $applied | Should -BeFalse
+            Test-IsNotFoundError -ErrorRecord $listNotFound | Should -BeFalse
         }
 
         It 'Invoke-RetryCommand fails fast on not-found (404) errors (no retry, no sleep)' {
@@ -1081,14 +1085,15 @@ Describe 'SPSCleanVersions Script' {
         }
 
         It 'Should not mask access-denied as drift or as a generic Failed row (re-throw to the per-site handler)' {
-            # Access-denied and not-found must bubble up to the single per-site handler rather than
-            # being swallowed by the drift fail-safe, the site-policy apply catch, the Legacy
-            # Set-PnPList catch or the batch-delete catch. Each of those intermediate catches
-            # re-throws both classes. Count the classifier calls (retry helper, drift, 3 apply/list
-            # catches, per-site handler => >= 5 each).
+            # Access-denied and not-found (site-level) must bubble up to the single per-site handler
+            # rather than being swallowed by the drift fail-safe, the site-policy apply catch or the
+            # batch-delete catch. Access-denied additionally bubbles up from the Legacy Set-PnPList
+            # catch (no rights on the whole site), whereas a Legacy Set-PnPList NotFound stays a
+            # library-level Failed. So access-denied appears in 6 classifier calls and not-found in 5
+            # (retry helper, drift, apply, batch-delete, per-site handler).
             $adCalls = ([regex]::Matches($scriptContent, 'Test-IsAccessDeniedError -ErrorRecord \$_')).Count
             $nfCalls = ([regex]::Matches($scriptContent, 'Test-IsNotFoundError -ErrorRecord \$_')).Count
-            $adCalls | Should -BeGreaterOrEqual 5
+            $adCalls | Should -BeGreaterOrEqual 6
             $nfCalls | Should -BeGreaterOrEqual 5
             # Invoke-RetryCommand checks access-denied and not-found BEFORE the auth branch and the
             # generic backoff (so structural errors fail fast, not 5x exponential backoff).
@@ -1117,6 +1122,19 @@ Describe 'SPSCleanVersions Script' {
         It 'Should normalize site URLs (strip sharing-link query strings) before processing' {
             $scriptContent | Should -Match 'function\s+Get-NormalizedSiteUrls'
             $scriptContent | Should -Match '\$SiteUrls = Get-NormalizedSiteUrls -Urls \$SiteUrls'
+        }
+
+        It 'Should fail validation when normalization leaves no usable URL' {
+            # SiteUrls = ["", "  "] passes the initial count check but normalizes to empty; the
+            # script must throw rather than report a successful zero-site run.
+            $scriptContent | Should -Match "contains no usable site URL after normalization"
+        }
+
+        It 'Legacy Set-PnPList not-found is a library-level Failed row, not a whole-site NotFound' {
+            # A NotFound from a per-library Set-PnPList identifies that library (e.g. deleted), not
+            # the site, so it must NOT be re-thrown to the per-site NotFound handler; only
+            # access-denied (which implies no rights on the whole site) bubbles up there.
+            $scriptContent | Should -Match 'A NotFound here identifies THIS library'
         }
 
         It 'Access-denied guidance is authentication-mode-specific (delegated vs app-only)' {

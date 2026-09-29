@@ -392,7 +392,11 @@ function Test-IsNotFoundError {
         [Parameter(Mandatory = $true)] [System.Management.Automation.ErrorRecord] $ErrorRecord
     )
     $message = [string]$ErrorRecord.Exception.Message
-    return [bool]($message -match '(?i)(status code is "?NotFound"?|\bnot ?found\b|\b404\b)')
+    # Match only explicit HTTP-status evidence of a missing site. A bare "not found" is deliberately
+    # NOT matched: PnP surfaces unrelated failures (a missing list, column, certificate or local
+    # resource) with that wording, and the per-site handler turns any match into a NotFound skip
+    # with site-URL guidance. "(404) Not Found" is still covered by the \b404\b alternative.
+    return [bool]($message -match '(?i)(status code is "?NotFound"?|\b404\b)')
 }
 
 function Get-NormalizedSiteUrls {
@@ -934,6 +938,11 @@ if ($SiteScope -eq 'Selected') {
     if ($cleanCount -ne $rawCount) {
         Write-Output "Normalized site URLs: $rawCount -> $cleanCount (stripped query strings/fragments and de-duplicated)."
     }
+    # The initial validation counts the raw entries; normalization can drop all of them (e.g.
+    # SiteUrls = ["", "   "]). Fail here rather than silently reporting a successful zero-site run.
+    if ($cleanCount -eq 0) {
+        throw "JSON property 'SiteUrls' contains no usable site URL after normalization (all entries were empty or malformed)."
+    }
 }
 
 # --- Local sign-in: sign in ONCE (interactive) before enumeration and the site loop, so the whole
@@ -1085,11 +1094,15 @@ foreach ($SiteUrl in $SiteUrls) {
                             -Major "$KeepMajorVersions" -Minor $minorReported -Detail "Set Major=$KeepMajorVersions, Minor=$minorReported"
                     }
                     catch {
-                        if ((Test-IsAccessDeniedError -ErrorRecord $_) -or (Test-IsNotFoundError -ErrorRecord $_)) {
-                            # Let the per-site handler record this as AccessDenied / NotFound (single
-                            # source of truth) rather than a generic per-library Failed row.
+                        if (Test-IsAccessDeniedError -ErrorRecord $_) {
+                            # Access-denied on a library update almost always means the account has
+                            # no rights on the whole site — let it bubble up to the per-site handler.
                             throw
                         }
+                        # A NotFound here identifies THIS library (e.g. deleted between enumeration
+                        # and update), not the site — record the library as Failed and keep going
+                        # with the other libraries. (A missing site is already caught earlier by
+                        # Get-PnPList, which fails fast to the per-site NotFound handler.)
                         Write-Warning "`tFAILED $($list.Title): $($_.Exception.Message)"
                         $legacyFailed++
                         Add-RunResult -SiteUrl $SiteUrl -Scope 'Legacy' -Library $list.Title -Outcome 'Failed' `
