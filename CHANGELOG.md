@@ -5,6 +5,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- CI / Release
+  - The release ZIP (`SPSCleanVersions-vX.Y.Z.zip`) now contains `SPSCleanVersions.ps1` at its
+    **root** instead of nested under a `scripts/` folder, so unzipping drops the script straight
+    into the target directory (aligned with the SPSWakeUp packaging). No change to the script or
+    to the PowerShell Gallery package (`Install-Script` is unaffected).
+
 ## [3.2.1] - 2026-09-29
 
 ### Added
