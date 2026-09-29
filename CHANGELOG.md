@@ -5,6 +5,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- SPSCleanVersions.ps1
+  - **JIT site collection admin (`AddSiteCollectionAdmin`).** Delegated runs can now process sites
+    the operator is not a site collection administrator of. When enabled, for each such site the
+    script journals the grant (crash-safety), temporarily adds the signed-in operator as site
+    collection admin through the admin center, processes the site, then revokes the grant in a
+    `finally` block. Sites where the operator is already an admin are never granted (and never
+    revoked), preserving pre-existing access. Requires `TenantAdminUrl` and the **SharePoint
+    Administrator** role (verified up front — fail-fast); ignored under app-only (Azure Automation).
+  - **`-CleanupAdminsOnly` cleanup mode.** Revokes any admin grants left behind by an interrupted
+    run, replaying the grant state file (`Logs/SPSCleanVersions-admins-*.jsonl`, or `-StateFile`).
+    Idempotent: a revoke that returns access-denied means the operator already lost access (already
+    revoked). The end-of-run summary reports grant/revoke counts and warns if any revoke failed.
+
 ### Changed
 
 - CI / Release
