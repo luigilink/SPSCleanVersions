@@ -10,7 +10,9 @@ Nothing is "frozen" during day-to-day development:
 - The version numbers inside `scripts/SPSCleanVersions.ps1` stay at their **last published
   value** and are **only bumped on a release branch**.
 - `CHANGELOG.md` accumulates entries under a single `## [Unreleased]` heading.
-- `RELEASE-NOTES.md` holds the notes for the next release under `## [Unreleased]`.
+- `RELEASE-NOTES.md` holds the notes for the **next release only**, under `## [Unreleased]`.
+  The whole file becomes the GitHub Release body, so it must never accumulate past
+  releases — their history lives in `CHANGELOG.md`.
 
 This way `main` never advertises a version that has not actually been published to the
 PowerShell Gallery.
@@ -53,7 +55,9 @@ When `main` is in a state worth publishing, decide the new version `x.y.z`
    above it.
 
 3. **Fill the release notes.** In `RELEASE-NOTES.md`, rename the `## [Unreleased]`
-   section to `## [x.y.z] - YYYY-MM-DD` (this becomes the GitHub Release body).
+   section to `## [x.y.z] - YYYY-MM-DD` and **delete the previous release's section** so
+   the file contains **only** the new version (its full history stays in `CHANGELOG.md`).
+   The entire file becomes the GitHub Release body.
 
 4. **Bump the three version fields** listed above to `x.y.z`.
 
