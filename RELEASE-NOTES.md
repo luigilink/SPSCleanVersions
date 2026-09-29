@@ -1,5 +1,22 @@
 # SPSCleanVersions - Release Notes
 
+## [Unreleased]
+
+### Added
+
+- SPSCleanVersions.ps1
+  - **`NotFound` outcome + fail-fast on 404.** A missing/deleted site (or a malformed URL) is
+    recorded as a distinct `NotFound` outcome (badge / KPI card / advisory) and skipped, and is
+    no longer retried — a 404 is structural, so `Invoke-RetryCommand` fails fast instead of
+    burning ~5 min of exponential backoff per site.
+
+### Changed
+
+- SPSCleanVersions.ps1
+  - **Site URL normalization** — sharing-link query strings/fragments (e.g.
+    `?xsdata=...&sdata=...`), trailing slashes and whitespace are stripped and the list is
+    de-duplicated before processing, so URLs copied from a browser/OneDrive no longer 404.
+
 ## [3.2.0] - 2026-09-17
 
 ### Changed

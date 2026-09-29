@@ -378,6 +378,56 @@ function Test-IsAccessDeniedError {
     return [bool]($message -match '(?i)(attempted to perform an unauthorized operation|access is denied|access denied|\b403\b|current user (has insufficient permissions|does not have permission))')
 }
 
+function Test-IsNotFoundError {
+    <#
+        .SYNOPSIS
+        Returns $true when an error indicates the target site was not found (HTTP 404 / NotFound)
+        — the site does not exist, was deleted, or the URL is malformed (e.g. a browser/OneDrive
+        sharing URL with a query string). This is a structural error: retrying cannot make a
+        missing site appear, so it must fail fast rather than burn the exponential backoff budget.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory = $true)] [System.Management.Automation.ErrorRecord] $ErrorRecord
+    )
+    $message = [string]$ErrorRecord.Exception.Message
+    return [bool]($message -match '(?i)(status code is "?NotFound"?|\bnot ?found\b|\b404\b)')
+}
+
+function Get-NormalizedSiteUrls {
+    <#
+        .SYNOPSIS
+        Normalizes a list of site collection URLs: strips any query string / fragment, trims
+        whitespace and trailing slashes, and de-duplicates (case-insensitive).
+
+        .DESCRIPTION
+        Site lists are often built by copy-pasting from a browser or OneDrive, which appends a
+        sharing-link query string (e.g. "?xsdata=...&sdata=...&ovuser=..."). Passing such a URL to
+        Connect-PnPOnline / Get-PnPSiteVersionPolicy makes SharePoint return 404 NotFound. Stripping
+        everything from the first '?' or '#' yields the canonical site URL and avoids that whole
+        class of failure. De-duplication prevents processing the same site twice when two entries
+        differ only by their query string.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param (
+        [Parameter()] [string[]] $Urls
+    )
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $result = [System.Collections.Generic.List[string]]::new()
+    foreach ($u in @($Urls)) {
+        if ([string]::IsNullOrWhiteSpace($u)) { continue }
+        $n = $u.Trim()
+        $cut = $n.IndexOfAny([char[]]@('?', '#'))
+        if ($cut -ge 0) { $n = $n.Substring(0, $cut) }
+        $n = $n.TrimEnd('/')
+        if ([string]::IsNullOrWhiteSpace($n)) { continue }
+        if ($seen.Add($n)) { [void]$result.Add($n) }
+    }
+    return , [string[]]$result.ToArray()
+}
+
 function Invoke-RetryCommand {
     <#
         .SYNOPSIS
@@ -409,6 +459,13 @@ function Invoke-RetryCommand {
                 # site collection administrator on the site). Not transient and not a token issue —
                 # do not retry and do not emit a token-oriented message here; let the per-site
                 # handler classify and skip it with actionable guidance.
+                throw
+            }
+            if (Test-IsNotFoundError -ErrorRecord $_) {
+                # Missing site (HTTP 404): the site does not exist, was deleted, or the URL is
+                # malformed (e.g. a browser/OneDrive sharing URL with a query string). Retrying
+                # cannot make it appear, so fail fast (previously this burned 5x exponential
+                # backoff — up to ~5 min per site) and let the per-site handler record it.
                 throw
             }
             if (Test-IsAuthError -ErrorRecord $_) {
@@ -497,11 +554,12 @@ function Export-SPSCleanVersionsReport {
     $skipped = @($rows | Where-Object { $_.Outcome -eq 'Skipped' -or $_.Outcome -eq 'Compliant' }).Count
     $failed = @($rows | Where-Object { $_.Outcome -eq 'Failed' }).Count
     $accessDenied = @($rows | Where-Object { $_.Outcome -eq 'AccessDenied' }).Count
+    $notFound = @($rows | Where-Object { $_.Outcome -eq 'NotFound' }).Count
     $appliedLabel = if ($DryRunMode) { 'Would apply' } else { 'Applied' }
     $appliedValue = if ($DryRunMode) { $wouldApply } else { $applied }
     $generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    $overall = if ($failed -gt 0 -or $accessDenied -gt 0) { 'ATTENTION' } else { 'OK' }
-    $overallClass = if ($failed -gt 0 -or $accessDenied -gt 0) { 'kpi-alert' } else { 'kpi-ok' }
+    $overall = if ($failed -gt 0 -or $accessDenied -gt 0 -or $notFound -gt 0) { 'ATTENTION' } else { 'OK' }
+    $overallClass = if ($failed -gt 0 -or $accessDenied -gt 0 -or $notFound -gt 0) { 'kpi-alert' } else { 'kpi-ok' }
     $dryTag = if ($DryRunMode) { '<span class="kpi kpi-dry">DryRun</span>' } else { '' }
 
     $css = @'
@@ -537,6 +595,7 @@ tr.row-alert td{background:#fff5f5}
 .badge.Skipped,.badge.Compliant{background:#9aa4ad}
 .badge.Failed{background:#c0392b}
 .badge.AccessDenied{background:#e67e22}
+.badge.NotFound{background:#8e44ad}
 .badge.InScope{background:#0a7d8c}
 footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
 '@
@@ -544,7 +603,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
     $sb = New-Object System.Text.StringBuilder
     foreach ($r in $rows) {
         $oc = ConvertTo-SPSHtmlEncoded ([string]$r.Outcome)
-        $rowClass = if ($r.Outcome -eq 'Failed' -or $r.Outcome -eq 'AccessDenied') { ' class="row-alert"' } else { '' }
+        $rowClass = if ($r.Outcome -eq 'Failed' -or $r.Outcome -eq 'AccessDenied' -or $r.Outcome -eq 'NotFound') { ' class="row-alert"' } else { '' }
         [void]$sb.Append("<tr$rowClass><td>" + (ConvertTo-SPSHtmlEncoded ([string]$r.Site)) + '</td>')
         [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Scope)) + '</td>')
         [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Library)) + '</td>')
@@ -557,6 +616,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
 
     $failedCardClass = if ($failed -gt 0) { 'card accent' } else { 'card' }
     $accessDeniedCardClass = if ($accessDenied -gt 0) { 'card accent' } else { 'card' }
+    $notFoundCardClass = if ($notFound -gt 0) { 'card accent' } else { 'card' }
     $encTitle = ConvertTo-SPSHtmlEncoded $Title
     $encVer = ConvertTo-SPSHtmlEncoded $Version
     $page = @"
@@ -573,6 +633,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
     <div class="card"><div class="card-value">$skipped</div><div class="card-label">Skipped / compliant</div></div>
     <div class="$failedCardClass"><div class="card-value">$failed</div><div class="card-label">Failed</div></div>
     <div class="$accessDeniedCardClass"><div class="card-value">$accessDenied</div><div class="card-label">Access denied</div></div>
+    <div class="$notFoundCardClass"><div class="card-value">$notFound</div><div class="card-label">Not found</div></div>
   </div>
   <section>
     <h2>Per-site results</h2>
@@ -662,11 +723,11 @@ function Test-SiteVersionPolicyDrift {
         $current = Invoke-RetryCommand -OperationName 'Get-PnPSiteVersionPolicy' -ScriptBlock { Get-PnPSiteVersionPolicy -ErrorAction Stop }
     }
     catch {
-        if ((Test-IsAccessDeniedError -ErrorRecord $_) -or (Test-IsAuthError -ErrorRecord $_)) {
-            # A permission (access-denied) or structural authentication failure reading the policy
-            # must NOT be masked as "drift" (which would mis-report the site as WouldApply/Applied
-            # and defeat the fail-fast behaviour). Let it bubble up so the per-site handler records
-            # it (AccessDenied for a permission problem, Failed for an auth/token error) and moves on.
+        if ((Test-IsAccessDeniedError -ErrorRecord $_) -or (Test-IsNotFoundError -ErrorRecord $_) -or (Test-IsAuthError -ErrorRecord $_)) {
+            # A permission (access-denied), missing-site (404 NotFound) or structural authentication
+            # failure reading the policy must NOT be masked as "drift" (which would mis-report the
+            # site as WouldApply/Applied and defeat the fail-fast behaviour). Let it bubble up so the
+            # per-site handler records it (AccessDenied / NotFound / Failed) and moves on.
             throw
         }
         Write-Verbose "Test-SiteVersionPolicyDrift: unable to read current policy ($($_.Exception.Message)); treating as drift."
@@ -862,6 +923,19 @@ function Get-TenantSiteUrls {
     }
 }
 
+# For 'Selected' scope, normalize the explicit site URLs BEFORE signing in: strip sharing-link
+# query strings/fragments and de-duplicate. This also makes the sign-in anchor (SiteUrls[0]) a
+# clean, canonical URL. ('All' scope URLs come from Get-PnPTenantSite and are normalized after
+# enumeration below.)
+if ($SiteScope -eq 'Selected') {
+    $rawCount = @($SiteUrls).Count
+    $SiteUrls = Get-NormalizedSiteUrls -Urls $SiteUrls
+    $cleanCount = @($SiteUrls).Count
+    if ($cleanCount -ne $rawCount) {
+        Write-Output "Normalized site URLs: $rawCount -> $cleanCount (stripped query strings/fragments and de-duplicated)."
+    }
+}
+
 # --- Local sign-in: sign in ONCE (interactive) before enumeration and the site loop, so the whole
 # run prompts a single time. This anchor connection serves the tenant enumeration directly (passed
 # as -Connection to Get-PnPTenantSite) and is the source of the delegated SharePoint token reused
@@ -906,6 +980,7 @@ if ($SiteScope -eq 'All') {
         throw "Failed to enumerate tenant sites from ${TenantAdminUrl}: $($_.Exception.Message)"
     }
     Write-Output "Discovered $(@($SiteUrls).Count) site collection(s) to process."
+    $SiteUrls = Get-NormalizedSiteUrls -Urls $SiteUrls
     if (@($SiteUrls).Count -eq 0) {
         Write-Warning "No site collections were returned from the tenant; nothing to process."
     }
@@ -1010,9 +1085,9 @@ foreach ($SiteUrl in $SiteUrls) {
                             -Major "$KeepMajorVersions" -Minor $minorReported -Detail "Set Major=$KeepMajorVersions, Minor=$minorReported"
                     }
                     catch {
-                        if (Test-IsAccessDeniedError -ErrorRecord $_) {
-                            # Let the per-site handler record this as AccessDenied (single source of
-                            # truth) rather than a generic per-library Failed row.
+                        if ((Test-IsAccessDeniedError -ErrorRecord $_) -or (Test-IsNotFoundError -ErrorRecord $_)) {
+                            # Let the per-site handler record this as AccessDenied / NotFound (single
+                            # source of truth) rather than a generic per-library Failed row.
                             throw
                         }
                         Write-Warning "`tFAILED $($list.Title): $($_.Exception.Message)"
@@ -1108,9 +1183,9 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
                     }
                 }
                 catch {
-                    if (Test-IsAccessDeniedError -ErrorRecord $_) {
-                        # Let the per-site handler record this as AccessDenied (single source of
-                        # truth) rather than a generic Failed row.
+                    if ((Test-IsAccessDeniedError -ErrorRecord $_) -or (Test-IsNotFoundError -ErrorRecord $_)) {
+                        # Let the per-site handler record this as AccessDenied / NotFound (single
+                        # source of truth) rather than a generic Failed row.
                         throw
                     }
                     Write-Warning "`tFAILED to apply site version policy on ${SiteUrl}: $($_.Exception.Message)"
@@ -1141,8 +1216,8 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                         Write-Output "`tBatch delete job submitted successfully for $SiteUrl"
                     }
                     catch {
-                        if (Test-IsAccessDeniedError -ErrorRecord $_) {
-                            # Surface access-denied through the per-site AccessDenied handler instead
+                        if ((Test-IsAccessDeniedError -ErrorRecord $_) -or (Test-IsNotFoundError -ErrorRecord $_)) {
+                            # Surface access-denied / not-found through the per-site handler instead
                             # of a bare warning that leaves no trace in the report/summary.
                             throw
                         }
@@ -1170,6 +1245,15 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                 Write-Warning "Access denied on ${SiteUrl}: the signed-in account is not a site collection administrator on this site. Add it as a site collection admin (or, once available, re-run with the AddSiteCollectionAdmin option) and retry. Skipping this site. Original error: $($_.Exception.Message)"
             }
             Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'AccessDenied' -Detail $accessDeniedDetail
+        }
+        elseif (Test-IsNotFoundError -ErrorRecord $_) {
+            # The site was not found (HTTP 404): it does not exist, was deleted, or the URL is
+            # malformed (e.g. a browser/OneDrive sharing URL still carrying a "?xsdata=..." query
+            # string — those are stripped during normalization, but a stale/deleted site can still
+            # 404). Not retried (fail-fast), recorded distinctly and skipped so the run continues.
+            Write-Warning "Site not found on ${SiteUrl}: the site does not exist, was deleted, or the URL is malformed. Verify the URL (a canonical site URL is https://<tenant>.sharepoint.com/sites/<name>, with no query string). Skipping this site. Original error: $($_.Exception.Message)"
+            Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'NotFound' `
+                -Detail 'Site not found (404): the site does not exist, was deleted, or the URL is malformed. Verify the URL and retry.'
         }
         else {
             Write-Error "Failed to process site $SiteUrl : $($_.Exception.Message)"
@@ -1222,10 +1306,11 @@ $sumApplied = @($script:RunResults | Where-Object { $_.Outcome -eq 'Applied' }).
 $sumWouldApply = @($script:RunResults | Where-Object { $_.Outcome -eq 'WouldApply' }).Count
 $sumSkipped = @($script:RunResults | Where-Object { $_.Outcome -eq 'Skipped' -or $_.Outcome -eq 'Compliant' }).Count
 $sumAccessDenied = @($script:RunResults | Where-Object { $_.Outcome -eq 'AccessDenied' }).Count
+$sumNotFound = @($script:RunResults | Where-Object { $_.Outcome -eq 'NotFound' }).Count
 $sumFailed = @($script:RunResults | Where-Object { $_.Outcome -eq 'Failed' }).Count
 $distinctSites = @($script:RunResults | Select-Object -ExpandProperty Site -Unique).Count
 $appliedPart = if ($WhatIfPreference) { "$sumWouldApply would apply" } else { "$sumApplied applied" }
-Write-Output "--- SPSCleanVersions finished: $distinctSites site(s), $($script:RunResults.Count) result(s) — $appliedPart, $sumSkipped skipped/compliant, $sumAccessDenied access-denied, $sumFailed failed ---"
+Write-Output "--- SPSCleanVersions finished: $distinctSites site(s), $($script:RunResults.Count) result(s) — $appliedPart, $sumSkipped skipped/compliant, $sumAccessDenied access-denied, $sumNotFound not-found, $sumFailed failed ---"
 if ($sumAccessDenied -gt 0) {
     if ($script:IsAzureAutomationRun) {
         Write-Warning "$sumAccessDenied site(s) were skipped due to access-denied under app-only authentication. Ensure the Managed Identity has the required SharePoint permission (Sites.FullControl.All), or run this mode locally/interactively with a site collection administrator (see the report for the list)."
@@ -1233,6 +1318,9 @@ if ($sumAccessDenied -gt 0) {
     else {
         Write-Warning "$sumAccessDenied site(s) were skipped because the signed-in account is not a site collection administrator on them. Grant site collection admin on those sites (see the report for the list) and re-run."
     }
+}
+if ($sumNotFound -gt 0) {
+    Write-Warning "$sumNotFound site(s) were skipped as not found (404): the site does not exist, was deleted, or the URL is malformed. Verify those URLs (see the report for the list) — a canonical site URL is https://<tenant>.sharepoint.com/sites/<name> with no query string."
 }
 
 if ($script:TranscriptStarted) {

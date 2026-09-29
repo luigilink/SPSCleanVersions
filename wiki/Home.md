@@ -11,7 +11,7 @@ SPSCleanVersions is a PowerShell script tool to clean Version History in your Sh
 * **Idempotent (drift-based):** in the site version policy modes, the policy is applied only where the current settings actually differ, so compliant sites are skipped.
 * **Tenant-wide Scope:** Set `"SiteScope": "All"` with a `TenantAdminUrl` to enumerate and process every site collection via `Get-PnPTenantSite`.
 * **Single sign-in:** local runs prompt **once** and reuse the delegated SharePoint token for every site (no per-site prompt, on any platform).
-* **Resilient batches:** throttling-aware retry (honours `Retry-After` on HTTP 429/503), fail-fast on auth/permission errors, and a dedicated `AccessDenied` outcome for sites where the signed-in account is not a site collection administrator — one bad site never aborts the run.
+* **Resilient batches:** site URL normalization (strips sharing-link query strings, de-duplicates), throttling-aware retry (honours `Retry-After` on HTTP 429/503), fail-fast on auth/permission/not-found errors, and dedicated `AccessDenied` / `NotFound` outcomes — one bad site never aborts the run.
 * **Logging & HTML Report:** each run produces a per-site summary — a transcript, a self-contained HTML report and a machine-readable JSON (`SPSCleanVersions-<timestamp>.json`) locally, or the summary emitted to the job output stream in Azure Automation.
 * **Multi-Site Processing:** Pass multiple Site Collection URLs in the `SiteUrls` JSON array to process them in a single execution.
 * **Force Delete Old Versions:** Set `"ForceDeleteOldVersions": true` to trigger a batch delete job via `New-PnPSiteFileVersionBatchDeleteJob`. Requires delegated user context (automatically skipped in Azure Automation).

@@ -114,7 +114,7 @@ By default (`SiteScope: Selected`) the script only processes the sites listed in
 
 ## Logging and reports
 
-Every run produces a summary of what happened per site (**Applied** / **WouldApply** / **Skipped** / **Compliant** / **AccessDenied** / **Failed**). The final summary line reports the counts, e.g. `--- SPSCleanVersions finished: N site(s), M result(s) — X would apply, Y skipped/compliant, Z access-denied, W failed ---`.
+Every run produces a summary of what happened per site (**Applied** / **WouldApply** / **Skipped** / **Compliant** / **AccessDenied** / **NotFound** / **Failed**). The final summary line reports the counts, e.g. `--- SPSCleanVersions finished: N site(s), M result(s) — X would apply, Y skipped/compliant, Z access-denied, K not-found, W failed ---`.
 
 - **Local execution:** a transcript is written to a `Logs/` folder and a self-contained HTML report (summary cards + a filterable table) to a `Results/` folder, both next to the script. A machine-readable JSON (`SPSCleanVersions-<timestamp>.json`) is written alongside the HTML. Files older than `LogRetentionDays` (default 180) are pruned automatically. Set `"EnableReport": false` to skip the HTML report.
 - **Azure Automation:** there is no persistent filesystem, so the **HTML report is not produced**. The per-site actions are visible in the job output (`Write-Output`/`Write-Warning`) and the run ends with a summary line (`--- SPSCleanVersions finished: ... ---`).
@@ -124,8 +124,9 @@ The report values are HTML-encoded, and a `DryRun` badge is shown when the run i
 ### Resilience: single sign-in, throttling and permission handling
 
 - **Single interactive sign-in.** A local run signs in **once**. That interactive connection drives the tenant enumeration (`Get-PnPTenantSite` for `SiteScope: All`) and its **SharePoint-audience delegated token** is reused for every site, so you are prompted a single time — not once per site — on every platform, including macOS.
+- **Site URL normalization.** `SiteUrls` are normalized before processing: sharing-link query strings/fragments (browser/OneDrive copy-paste often appends `?xsdata=...&sdata=...&ovuser=...`), trailing slashes and whitespace are stripped, and the list is de-duplicated. A canonical site URL is `https://<tenant>.sharepoint.com/sites/<name>` with **no** query string; an un-stripped sharing URL makes `Get-PnPSiteVersionPolicy` return 404.
 - **Throttling-aware retry.** SharePoint calls are wrapped with a retry that honours the server `Retry-After` hint on HTTP 429/503 (capped at 300s) and otherwise uses exponential backoff — important for tenant-scale runs.
-- **Fail fast on structural errors.** Authentication/token failures and permission (`AccessDenied`) failures are **not** retried (retrying cannot recover them); they are surfaced immediately with actionable guidance, and permission failures are recorded as `AccessDenied` per site (see [Site collection administrator requirement](#site-collection-administrator-requirement-delegated-runs)).
+- **Fail fast on structural errors.** Authentication/token failures, permission (`AccessDenied`) failures and missing-site (`NotFound`, HTTP 404) failures are **not** retried (retrying cannot recover them); they are surfaced immediately with actionable guidance and recorded per site as `AccessDenied` (see [Site collection administrator requirement](#site-collection-administrator-requirement-delegated-runs)) or `NotFound`. Failing fast on a 404 avoids burning ~5 min of backoff per missing site at tenant scale.
 
 ## Examples
 
@@ -330,3 +331,19 @@ Set-PnPTenantSite -Url "https://contoso.sharepoint.com/sites/<site>" -Owners "<u
 
 or via the SharePoint admin center → *Sites* → *Active sites* → select the site → *Membership* →
 *Site admins*.
+
+### Warning: `Site not found on <site> ... 404` (outcome `NotFound`)
+
+The site could not be found. Common causes:
+
+- The URL carries a **sharing-link query string** (e.g. `.../sites/Foo?xsdata=...&sdata=...&ovuser=...`),
+  typically from copying a link out of a browser or OneDrive. These are stripped automatically by
+  URL normalization, but a list built entirely of such links, or one whose real path is not a plain
+  `/sites/<name>`, can still 404.
+- The site was **deleted** or **archived** since the list was generated.
+- A simple **typo** in the URL.
+
+A canonical site URL is `https://<tenant>.sharepoint.com/sites/<name>` with **no** query string.
+The site is skipped (not failed) and the run continues; the `NotFound` count and the report list
+the affected URLs. Fix the URLs (or remove deleted sites from the list) and re-run. Missing sites
+fail fast — they are not retried — so a stale list no longer slows the run down.
