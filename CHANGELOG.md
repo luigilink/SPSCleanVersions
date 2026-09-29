@@ -5,6 +5,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- SPSCleanVersions.ps1
+  - **Distinct `NotFound` outcome for missing sites (HTTP 404).** A site that does not exist,
+    was deleted, or whose URL is malformed is now recorded as a dedicated `NotFound` outcome
+    (with its own report badge / KPI card and an end-of-run advisory) and **skipped**, instead
+    of failing the run or being retried. A 404 is structural — retrying cannot make a missing
+    site appear — so `Invoke-RetryCommand` now **fails fast** on it (previously it burned the
+    full exponential backoff, up to ~5 min per site, which is crippling at tenant scale).
+
+### Changed
+
+- SPSCleanVersions.ps1
+  - **Site URL normalization.** `SiteUrls` are now normalized before processing: any sharing-link
+    query string or fragment is stripped (browser/OneDrive copy-paste often appends
+    `?xsdata=...&sdata=...&ovuser=...`, which makes `Get-PnPSiteVersionPolicy` return 404), along
+    with trailing slashes and whitespace, and the list is de-duplicated. This is applied to the
+    explicit `SiteUrls` (before the sign-in anchor is chosen) and, defensively, to the sites
+    enumerated for `SiteScope: All`.
+
 ## [3.2.0] - 2026-09-17
 
 ### Changed

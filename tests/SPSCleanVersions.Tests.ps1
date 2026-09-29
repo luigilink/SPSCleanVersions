@@ -884,7 +884,7 @@ Describe 'SPSCleanVersions Script' {
         BeforeAll {
             $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
             $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
-            $wanted = 'Invoke-RetryCommand', 'Get-RetryAfterDelay', 'Test-IsAuthError', 'Test-IsAccessDeniedError'
+            $wanted = 'Invoke-RetryCommand', 'Get-RetryAfterDelay', 'Test-IsAuthError', 'Test-IsAccessDeniedError', 'Test-IsNotFoundError', 'Get-NormalizedSiteUrls'
             $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
             foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
         }
@@ -1010,6 +1010,50 @@ Describe 'SPSCleanVersions Script' {
             Test-IsAccessDeniedError -ErrorRecord $denied2 | Should -BeTrue
             Test-IsAccessDeniedError -ErrorRecord $throttle | Should -BeFalse
         }
+
+        It 'Test-IsNotFoundError detects missing-site (404) failures and ignores others' {
+            $nf1 = try { throw 'Unexpected response from the server. The content type of the response is "text/plain". The status code is "NotFound".' } catch { $_ }
+            $nf2 = try { throw 'The remote server returned an error: (404) Not Found.' } catch { $_ }
+            $throttle = try { throw 'Request was throttled. Retry-After: 30' } catch { $_ }
+            $applied = try { throw 'Set policy OK' } catch { $_ }
+            # A bare "not found" on an unrelated resource (list/column/certificate) must NOT be
+            # classified as a missing site — only explicit HTTP-status evidence counts.
+            $listNotFound = try { throw 'List ''Documents'' was not found on this site.' } catch { $_ }
+            Test-IsNotFoundError -ErrorRecord $nf1 | Should -BeTrue
+            Test-IsNotFoundError -ErrorRecord $nf2 | Should -BeTrue
+            Test-IsNotFoundError -ErrorRecord $throttle | Should -BeFalse
+            Test-IsNotFoundError -ErrorRecord $applied | Should -BeFalse
+            Test-IsNotFoundError -ErrorRecord $listNotFound | Should -BeFalse
+        }
+
+        It 'Invoke-RetryCommand fails fast on not-found (404) errors (no retry, no sleep)' {
+            $script:calls = 0
+            $script:slept = $false
+            Mock -CommandName Start-Sleep -MockWith { $script:slept = $true }
+            { Invoke-RetryCommand -OperationName 'nf' -BaseDelaySeconds 1 -MaxRetries 5 -ScriptBlock {
+                    $script:calls++; throw 'The status code is "NotFound".'
+                } } | Should -Throw
+            $script:calls | Should -Be 1
+            $script:slept | Should -BeFalse
+        }
+
+        It 'Get-NormalizedSiteUrls strips query strings, fragments, trailing slashes and de-duplicates' {
+            $in = @(
+                'https://c.sharepoint.com/sites/A?xsdata=abc&sdata=def&ovuser=x',
+                'https://c.sharepoint.com/sites/B/',
+                '  https://c.sharepoint.com/sites/B  ',
+                'https://c.sharepoint.com/sites/Clean',
+                'https://c.sharepoint.com/sites/Frag#section',
+                '',
+                $null
+            )
+            $out = Get-NormalizedSiteUrls -Urls $in
+            $out.Count | Should -Be 4
+            $out | Should -Contain 'https://c.sharepoint.com/sites/A'
+            $out | Should -Contain 'https://c.sharepoint.com/sites/B'
+            $out | Should -Contain 'https://c.sharepoint.com/sites/Clean'
+            $out | Should -Contain 'https://c.sharepoint.com/sites/Frag'
+        }
     }
 
     Context 'Error handling' {
@@ -1041,23 +1085,56 @@ Describe 'SPSCleanVersions Script' {
         }
 
         It 'Should not mask access-denied as drift or as a generic Failed row (re-throw to the per-site handler)' {
-            # Access-denied must bubble up to the single per-site AccessDenied handler rather than
-            # being swallowed by the drift fail-safe, the site-policy apply catch, the Legacy
-            # Set-PnPList catch or the batch-delete catch. Each of those intermediate catches
-            # re-throws when access-denied is detected.
-            $reThrows = ([regex]::Matches($scriptContent, 'if \(Test-IsAccessDeniedError -ErrorRecord \$_\) \{\s*(#[^\r\n]*\r?\n\s*)*throw')).Count
-            $reThrows | Should -BeGreaterOrEqual 4
-            # Invoke-RetryCommand checks access-denied BEFORE the auth branch (so no token-oriented
-            # message is emitted for a permission problem).
+            # Access-denied and not-found (site-level) must bubble up to the single per-site handler
+            # rather than being swallowed by the drift fail-safe, the site-policy apply catch or the
+            # batch-delete catch. Access-denied additionally bubbles up from the Legacy Set-PnPList
+            # catch (no rights on the whole site), whereas a Legacy Set-PnPList NotFound stays a
+            # library-level Failed. So access-denied appears in 6 classifier calls and not-found in 5
+            # (retry helper, drift, apply, batch-delete, per-site handler).
+            $adCalls = ([regex]::Matches($scriptContent, 'Test-IsAccessDeniedError -ErrorRecord \$_')).Count
+            $nfCalls = ([regex]::Matches($scriptContent, 'Test-IsNotFoundError -ErrorRecord \$_')).Count
+            $adCalls | Should -BeGreaterOrEqual 6
+            $nfCalls | Should -BeGreaterOrEqual 5
+            # Invoke-RetryCommand checks access-denied and not-found BEFORE the auth branch and the
+            # generic backoff (so structural errors fail fast, not 5x exponential backoff).
             $idxDenied = $scriptContent.IndexOf('if (Test-IsAccessDeniedError -ErrorRecord $_)')
+            $idxNotFound = $scriptContent.IndexOf('if (Test-IsNotFoundError -ErrorRecord $_)')
             $idxAuth = $scriptContent.IndexOf('if (Test-IsAuthError -ErrorRecord $_)')
+            $idxBackoff = $scriptContent.IndexOf('if ($attempt -ge $MaxRetries) { throw }')
             $idxDenied | Should -BeLessThan $idxAuth
+            $idxNotFound | Should -BeLessThan $idxBackoff
         }
 
-        It 'Drift read re-throws structural auth failures too (fail-fast preserved, no bogus WouldApply)' {
-            # Test-SiteVersionPolicyDrift must not convert a 401/token failure into "treat as drift"
-            # (which would report WouldApply in a dry run); it re-throws both access-denied and auth.
-            $scriptContent | Should -Match '\(Test-IsAccessDeniedError -ErrorRecord \$_\) -or \(Test-IsAuthError -ErrorRecord \$_\)'
+        It 'Drift read re-throws structural auth/permission/not-found failures (fail-fast, no bogus WouldApply)' {
+            # Test-SiteVersionPolicyDrift must not convert a 401/403/404 into "treat as drift"
+            # (which would report WouldApply in a dry run); it re-throws access-denied, not-found and auth.
+            $scriptContent | Should -Match '\(Test-IsAccessDeniedError -ErrorRecord \$_\) -or \(Test-IsNotFoundError -ErrorRecord \$_\) -or \(Test-IsAuthError -ErrorRecord \$_\)'
+        }
+
+        It 'Should classify per-site not-found (404) as a distinct, actionable outcome' {
+            # A missing/deleted/malformed-URL site is recorded as NotFound (not Failed), skipped,
+            # and surfaced with guidance about the canonical URL shape.
+            $scriptContent | Should -Match 'elseif \(Test-IsNotFoundError -ErrorRecord \$_\)'
+            $scriptContent | Should -Match "Outcome 'NotFound'"
+            $scriptContent | Should -Match 'the site does not exist, was deleted, or the URL is malformed'
+        }
+
+        It 'Should normalize site URLs (strip sharing-link query strings) before processing' {
+            $scriptContent | Should -Match 'function\s+Get-NormalizedSiteUrls'
+            $scriptContent | Should -Match '\$SiteUrls = Get-NormalizedSiteUrls -Urls \$SiteUrls'
+        }
+
+        It 'Should fail validation when normalization leaves no usable URL' {
+            # SiteUrls = ["", "  "] passes the initial count check but normalizes to empty; the
+            # script must throw rather than report a successful zero-site run.
+            $scriptContent | Should -Match "contains no usable site URL after normalization"
+        }
+
+        It 'Legacy Set-PnPList not-found is a library-level Failed row, not a whole-site NotFound' {
+            # A NotFound from a per-library Set-PnPList identifies that library (e.g. deleted), not
+            # the site, so it must NOT be re-thrown to the per-site NotFound handler; only
+            # access-denied (which implies no rights on the whole site) bubbles up there.
+            $scriptContent | Should -Match 'A NotFound here identifies THIS library'
         }
 
         It 'Access-denied guidance is authentication-mode-specific (delegated vs app-only)' {
@@ -1069,16 +1146,22 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'the signed-in account is not a site collection administrator on this site'
         }
 
-        It 'Should surface an end-of-run advisory and count for access-denied sites' {
+        It 'Should surface an end-of-run advisory and count for access-denied and not-found sites' {
             $scriptContent | Should -Match '\$sumAccessDenied = @\(\$script:RunResults \| Where-Object \{ \$_\.Outcome -eq ''AccessDenied'' \}\)\.Count'
+            $scriptContent | Should -Match '\$sumNotFound = @\(\$script:RunResults \| Where-Object \{ \$_\.Outcome -eq ''NotFound'' \}\)\.Count'
             $scriptContent | Should -Match 'access-denied'
+            $scriptContent | Should -Match 'not-found'
             $scriptContent | Should -Match 'if \(\$sumAccessDenied -gt 0\) \{'
+            $scriptContent | Should -Match 'if \(\$sumNotFound -gt 0\) \{'
         }
 
-        It 'Report styles the AccessDenied outcome (badge + KPI card)' {
+        It 'Report styles the AccessDenied and NotFound outcomes (badge + KPI card)' {
             $scriptContent | Should -Match '\.badge\.AccessDenied\{'
+            $scriptContent | Should -Match '\.badge\.NotFound\{'
             $scriptContent | Should -Match 'Access denied</div>'
+            $scriptContent | Should -Match 'Not found</div>'
             $scriptContent | Should -Match "\`$r\.Outcome -eq 'AccessDenied'"
+            $scriptContent | Should -Match "\`$r\.Outcome -eq 'NotFound'"
         }
     }
 }
