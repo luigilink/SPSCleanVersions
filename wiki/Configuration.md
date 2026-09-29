@@ -336,14 +336,17 @@ or via the SharePoint admin center → *Sites* → *Active sites* → select the
 
 The site could not be found. Common causes:
 
-- The URL carries a **sharing-link query string** (e.g. `.../sites/Foo?xsdata=...&sdata=...&ovuser=...`),
-  typically from copying a link out of a browser or OneDrive. These are stripped automatically by
-  URL normalization, but a list built entirely of such links, or one whose real path is not a plain
-  `/sites/<name>`, can still 404.
+- A **sharing-link query string** on the URL (e.g. `.../sites/Foo?xsdata=...&sdata=...&ovuser=...`),
+  typically from copying a link out of a browser or OneDrive. Each URL's query string and fragment
+  are stripped automatically by normalization, so this alone no longer causes a 404.
+- A copied link whose **path itself is not a site-collection URL** — for example a sharing/redirect
+  link such as `/:f:/s/...` or `/:w:/r/...`, a OneDrive `/personal/...` URL, or a deep document/list
+  path. Stripping the query string does not turn these into a `/sites/<name>` (or `/teams/<name>`)
+  site URL, so they still 404. Replace them with the canonical site URL.
 - The site was **deleted** or **archived** since the list was generated.
 - A simple **typo** in the URL.
 
-A canonical site URL is `https://<tenant>.sharepoint.com/sites/<name>` with **no** query string.
-The site is skipped (not failed) and the run continues; the `NotFound` count and the report list
-the affected URLs. Fix the URLs (or remove deleted sites from the list) and re-run. Missing sites
-fail fast — they are not retried — so a stale list no longer slows the run down.
+A canonical site URL is `https://<tenant>.sharepoint.com/sites/<name>` (or `/teams/<name>`) with
+**no** query string. The site is skipped (not failed) and the run continues; the `NotFound` count
+and the report list the affected URLs. Fix the URLs (or remove deleted sites from the list) and
+re-run. Missing sites fail fast — they are not retried — so a stale list no longer slows the run down.
