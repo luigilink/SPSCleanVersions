@@ -127,11 +127,19 @@ recorded in the state file:
 ```
 
 It replays the newest `SPSCleanVersions-admins-*.jsonl` in `Logs/` (or pass `-StateFile <path>`),
-removing the operator from each recorded site, then exits without processing any policy. It is
-**idempotent**: once the operator has removed itself it loses site access, so a revoke that returns
-access-denied is treated as *already clean*. The end-of-run summary reports
-`granted / revoked / revoke-failed`; a non-zero **revoke-failed** count triggers a warning telling
-you to run `-CleanupAdminsOnly`.
+removing the operator from each **outstanding** grant (a grant with no matching revoke tombstone),
+then exits without processing any policy. Each successful revoke appends a durable revoke record so
+re-running cleanup never re-revokes a grant that was already cleaned up (which could otherwise remove
+a legitimately re-acquired access). It is **idempotent**: once the operator has removed itself it
+loses site access, so a revoke that returns access-denied is treated as *already clean*.
+
+> **Run cleanup as the same operator.** The self-revoke removes the operator using its **own** site
+> context, so `-CleanupAdminsOnly` must be run **signed in as the operator that created the grants**.
+> Grants recorded for a different operator are **not** revoked (they are reported in a warning); that
+> operator must run the cleanup themselves.
+
+The end-of-run summary reports `granted / revoked / revoke-failed`; a non-zero **revoke-failed**
+count triggers a warning telling you to run `-CleanupAdminsOnly`.
 
 > **Security note.** Grants are temporary and per-site, journalled for audit, and removed at the end
 > of each site. Only sites the operator was **not** already an admin of are touched. The operator

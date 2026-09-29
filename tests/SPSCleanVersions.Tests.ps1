@@ -1271,6 +1271,55 @@ Describe 'SPSCleanVersions Script' {
             finally { Remove-Item $tmp.FullName -Force -ErrorAction SilentlyContinue }
         }
 
+        It 'Get-AdminGrantRecords returns only grants without a matching revoke tombstone' {
+            $tmp = New-Item -Path (Join-Path ([System.IO.Path]::GetTempPath()) ("jit-" + [guid]::NewGuid().ToString('N') + '.jsonl')) -ItemType File -Force
+            try {
+                Save-AdminGrantRecord -Path $tmp.FullName -SiteUrl 'https://c/sites/A' -OperatorUpn 'op@c.com' -Type 'grant'
+                Save-AdminGrantRecord -Path $tmp.FullName -SiteUrl 'https://c/sites/B' -OperatorUpn 'op@c.com' -Type 'grant'
+                Save-AdminGrantRecord -Path $tmp.FullName -SiteUrl 'https://c/sites/A' -OperatorUpn 'op@c.com' -Type 'revoke'  # A revoked
+                $recs = Get-AdminGrantRecords -Path $tmp.FullName
+                @($recs).Count | Should -Be 1
+                $recs[0].Site | Should -Be 'https://c/sites/B'
+            }
+            finally { Remove-Item $tmp.FullName -Force -ErrorAction SilentlyContinue }
+        }
+
+        It 'Legacy grant records without a Type are treated as grants' {
+            $tmp = New-Item -Path (Join-Path ([System.IO.Path]::GetTempPath()) ("jit-" + [guid]::NewGuid().ToString('N') + '.jsonl')) -ItemType File -Force
+            try {
+                Set-Content -Path $tmp.FullName -Value '{"Site":"https://c/sites/A","Operator":"op@c.com","GrantedAt":"2026-01-01T00:00:00Z"}' -Encoding UTF8
+                $recs = Get-AdminGrantRecords -Path $tmp.FullName
+                @($recs).Count | Should -Be 1
+                $recs[0].Site | Should -Be 'https://c/sites/A'
+            }
+            finally { Remove-Item $tmp.FullName -Force -ErrorAction SilentlyContinue }
+        }
+
+        It 'Cleanup writes a revoke tombstone and only revokes the signed-in operator grants' {
+            $scriptContent | Should -Match 'Save-AdminGrantRecord -Path \$stateToUse -SiteUrl \$rec\.Site -OperatorUpn \$rec\.Operator -Type ''revoke'''
+            $scriptContent | Should -Match '\$mine = @\(\$records \| Where-Object \{ \$_\.Operator -ieq \$script:OperatorUpn \}\)'
+            $scriptContent | Should -Match 'belong to a different operator'
+        }
+
+        It 'Per-site revoke writes a durable tombstone on success' {
+            $scriptContent | Should -Match 'Save-AdminGrantRecord -Path \$script:AdminGrantStateFile -SiteUrl \$SiteUrl -OperatorUpn \$script:OperatorUpn -Type ''revoke'''
+        }
+
+        It 'Grant propagation wait polls the privileged admin operation (not a plain web read)' {
+            # Add-OperatorSiteAdmin must poll Get-PnPSiteCollectionAdmin, not Get-PnPWeb, so an
+            # operator with ordinary read access does not pass the wait before the admin grant lands.
+            $addFn = ([regex]::Match($scriptContent, 'function Add-OperatorSiteAdmin[\s\S]*?\n\}')).Value
+            $addFn | Should -Match '\$null = Get-PnPSiteCollectionAdmin -ErrorAction Stop'
+            $addFn | Should -Not -Match '\$null = Get-PnPWeb'
+        }
+
+        It 'SharePoint Admin preflight fails fast (re-throws) on unexpected errors' {
+            $fn = ([regex]::Match($scriptContent, 'function Test-IsSharePointAdmin[\s\S]*?\n\}')).Value
+            $fn | Should -Match 'if \(Test-IsAccessDeniedError -ErrorRecord \$_\) \{ return \$false \}'
+            $fn | Should -Match '(?m)^\s*throw\s*$'
+            $fn | Should -Not -Match 'assuming role present'
+        }
+
         It 'Remove-OperatorSiteAdmin is idempotent: access-denied on revoke means already-clean (true)' {
             $script:removeBehavior = 'denied'
             Remove-OperatorSiteAdmin -SiteUrl 'https://c/sites/A' -OperatorUpn 'op@c.com' -AdminConnection 'conn' | Should -BeTrue

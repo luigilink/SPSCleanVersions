@@ -82,18 +82,23 @@
       - LogRetentionDays      (integer, optional, default: 180) — prune Logs/ and Results/ files
                               older than this many days (local only). 0 disables pruning.
 
+    .PARAMETER ConfigFile
+    Path to a local JSON file containing the same configuration schema as -InputJson.
+    Ideal for local execution and testing. The file is read and parsed with
+    ConvertFrom-Json. Mutually exclusive with -InputJson. See
+    Config/SPSCleanVersions.example.json for a template.
+
     .PARAMETER CleanupAdminsOnly
     Cleanup mode for the AddSiteCollectionAdmin feature. Revokes any site collection admin grants
     left behind by a previous interrupted run: reads the grant state file (the newest
     SPSCleanVersions-admins-*.jsonl in Logs/, or -StateFile) and removes the operator from each
-    recorded site, then exits without processing any policy. Requires the same config (ClientId,
-    TenantAdminUrl) as the original run.
+    recorded site, then exits without processing any policy. Must be run by the SAME operator that
+    created the grants (the self-revoke uses the operator's own site context), with the same
+    ClientId / TenantAdminUrl.
 
     .PARAMETER StateFile
     Path to the admin-grant state file to replay with -CleanupAdminsOnly. Defaults to the most
     recent SPSCleanVersions-admins-*.jsonl in the Logs/ folder.
-    ConvertFrom-Json. Mutually exclusive with -InputJson. See
-    Config/SPSCleanVersions.example.json for a template.
 
     .EXAMPLE
     .\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/site1"],"KeepMajorVersions":100,"KeepMinorVersions":10}'
@@ -1011,9 +1016,10 @@ function Test-IsSharePointAdmin {
     }
     catch {
         if (Test-IsAccessDeniedError -ErrorRecord $_) { return $false }
-        # A non-permission error (throttling, transient) should not be read as "not admin".
-        Write-Verbose "Test-IsSharePointAdmin: non-permission error ($($_.Exception.Message)); assuming role present."
-        return $true
+        # Any other failure (the read did not clearly succeed) must not be silently read as
+        # "role present" — that would defer discovery of the missing privilege to the per-site
+        # grants. Re-throw so the caller fails fast with the real error.
+        throw
     }
 }
 
@@ -1049,16 +1055,19 @@ function Test-OperatorIsSiteAdmin {
 function Save-AdminGrantRecord {
     <#
         .SYNOPSIS
-        Appends one JSON-lines record to the persistent grant state file, written BEFORE the grant
-        so an interrupted run can always be cleaned up (crash-safety).
+        Appends a grant or revoke record (JSON-lines) to the persistent state file. A 'grant' record
+        is written BEFORE the grant (crash-safety); a 'revoke' record is written AFTER a successful
+        revoke as a durable tombstone, so a grant that has been revoked is not replayed by a later
+        -CleanupAdminsOnly run.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)] [string] $Path,
         [Parameter(Mandatory = $true)] [string] $SiteUrl,
-        [Parameter(Mandatory = $true)] [string] $OperatorUpn
+        [Parameter(Mandatory = $true)] [string] $OperatorUpn,
+        [ValidateSet('grant', 'revoke')] [string] $Type = 'grant'
     )
-    $record = [ordered]@{ Site = $SiteUrl; Operator = $OperatorUpn; GrantedAt = (Get-Date).ToString('o') }
+    $record = [ordered]@{ Type = $Type; Site = $SiteUrl; Operator = $OperatorUpn; Timestamp = (Get-Date).ToString('o') }
     $json = ConvertTo-Json -InputObject $record -Compress
     Add-Content -Path $Path -Value $json -Encoding UTF8 -WhatIf:$false
 }
@@ -1066,21 +1075,31 @@ function Save-AdminGrantRecord {
 function Get-AdminGrantRecords {
     <#
         .SYNOPSIS
-        Reads the JSON-lines grant state file and returns the distinct { Site, Operator } grants to
-        revoke. Malformed lines are skipped.
+        Reads the JSON-lines state file and returns the { Site, Operator } grants that are still
+        OUTSTANDING — i.e. a 'grant' record with no matching 'revoke' tombstone for the same
+        Site+Operator. Malformed lines are skipped. This keeps -CleanupAdminsOnly from re-revoking a
+        grant that was already cleaned up (which could remove a legitimately re-acquired access).
     #>
     [CmdletBinding()]
     [OutputType([object[]])]
     param([Parameter(Mandatory = $true)] [string] $Path)
     if (-not (Test-Path -LiteralPath $Path)) { return @() }
+    $grants = [System.Collections.Generic.List[object]]::new()
+    $revoked = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $out = [System.Collections.Generic.List[object]]::new()
     foreach ($line in (Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue)) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         try { $r = $line | ConvertFrom-Json } catch { continue }
         if (-not $r.Site -or -not $r.Operator) { continue }
         $key = "$($r.Site)|$($r.Operator)"
-        if ($seen.Add($key)) { [void]$out.Add([PSCustomObject]@{ Site = [string]$r.Site; Operator = [string]$r.Operator }) }
+        # Records with no Type are legacy 'grant' entries.
+        $type = if ($r.PSObject.Properties['Type'] -and $r.Type) { [string]$r.Type } else { 'grant' }
+        if ($type -eq 'revoke') { [void]$revoked.Add($key); continue }
+        if ($seen.Add($key)) { [void]$grants.Add([PSCustomObject]@{ Key = $key; Site = [string]$r.Site; Operator = [string]$r.Operator }) }
+    }
+    $out = [System.Collections.Generic.List[object]]::new()
+    foreach ($g in $grants) {
+        if (-not $revoked.Contains($g.Key)) { [void]$out.Add([PSCustomObject]@{ Site = $g.Site; Operator = $g.Operator }) }
     }
     return , $out.ToArray()
 }
@@ -1102,12 +1121,16 @@ function Add-OperatorSiteAdmin {
     )
     Set-PnPTenantSite -Identity $SiteUrl -Owners $OperatorUpn -Connection $AdminConnection -ErrorAction Stop
     # Propagation is effectively instant in testing, but wait briefly to be safe on slower tenants.
+    # Poll the SAME privileged operation the pre-grant probe uses (Get-PnPSiteCollectionAdmin), not a
+    # plain site read: an operator that already had ordinary read access would pass such a read
+    # immediately without actually being a site collection admin yet, so the wait must prove the
+    # admin grant itself has propagated.
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt $MaxWaitSeconds) {
         try {
             $tok = Get-PnPAccessToken -Connection $AdminConnection -ResourceTypeName SharePoint
             Connect-PnPOnline -Url $SiteUrl -AccessToken $tok -ErrorAction Stop
-            $null = Get-PnPWeb -ErrorAction Stop
+            $null = Get-PnPSiteCollectionAdmin -ErrorAction Stop
             return $true
         }
         catch { Start-Sleep -Seconds 3 }
@@ -1259,11 +1282,24 @@ if ($CleanupAdminsOnly) {
     }
     Write-Output "--- CleanupAdminsOnly: replaying admin-grant revocations from $stateToUse ---"
     $records = Get-AdminGrantRecords -Path $stateToUse
-    Write-Output "Found $(@($records).Count) grant record(s) to revoke."
+    # Safety (identity match): the self-revoke removes the operator using the CURRENT sign-in's own
+    # site context. If a different admin runs cleanup, connecting to a site they cannot access would
+    # return access-denied, which Remove-OperatorSiteAdmin treats as "already clean" — silently
+    # leaving the RECORDED operator elevated. So only revoke grants that belong to the signed-in
+    # operator, and warn about any records for a different operator (which that operator must clean
+    # up themselves, or which need an admin-context removal path — a future enhancement).
+    $mine = @($records | Where-Object { $_.Operator -ieq $script:OperatorUpn })
+    $others = @($records | Where-Object { $_.Operator -inotlike $script:OperatorUpn })
+    if ($others.Count -gt 0) {
+        $otherOps = ($others | Select-Object -ExpandProperty Operator -Unique) -join ', '
+        Write-Warning "-CleanupAdminsOnly: $($others.Count) outstanding grant(s) belong to a different operator ($otherOps) than the signed-in account ($($script:OperatorUpn)) and were NOT revoked. Re-run -CleanupAdminsOnly signed in as that operator."
+    }
+    Write-Output "Found $($mine.Count) outstanding grant(s) for $($script:OperatorUpn) to revoke."
     $revoked = 0; $revokeFailed = 0
-    foreach ($rec in $records) {
+    foreach ($rec in $mine) {
         if (Remove-OperatorSiteAdmin -SiteUrl $rec.Site -OperatorUpn $rec.Operator -AdminConnection $script:DelegatedAuthConnection) {
             Write-Output "  revoked (or already clean): $($rec.Site)"
+            Save-AdminGrantRecord -Path $stateToUse -SiteUrl $rec.Site -OperatorUpn $rec.Operator -Type 'revoke'
             $revoked++
         }
         else { $revokeFailed++ }
@@ -1606,6 +1642,8 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
             Write-Output "`tJIT: revoking site collection admin ($($script:OperatorUpn)) ..."
             if (Remove-OperatorSiteAdmin -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn -AdminConnection $script:DelegatedAuthConnection) {
                 $script:JitRevoked++
+                # Durable tombstone: a revoked grant must not be replayed by a later -CleanupAdminsOnly.
+                Save-AdminGrantRecord -Path $script:AdminGrantStateFile -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn -Type 'revoke'
             }
             else {
                 $script:JitRevokeFailed++
