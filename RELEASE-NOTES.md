@@ -1,5 +1,13 @@
 # SPSCleanVersions - Release Notes
 
+## [Unreleased]
+
+### Changed
+
+- CI / Release
+  - The release ZIP now contains `SPSCleanVersions.ps1` at its **root** (not under `scripts/`),
+    aligned with SPSWakeUp packaging. No change to the script or the PowerShell Gallery package.
+
 ## [3.2.1] - 2026-09-29
 
 ### Added
