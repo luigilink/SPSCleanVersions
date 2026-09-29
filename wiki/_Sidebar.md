@@ -4,6 +4,7 @@
 - [🚀 Getting Started](Getting-Started)
 - [⚙️ Configuration](Configuration)
 - [📖 Usage](Usage)
+- [📦 Release Process](Release-Process)
 
 ---
 
