@@ -97,8 +97,14 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'Provide configuration via -InputJson'
         }
 
-        It 'Should have exactly two parameters in the param block' {
-            $paramBlock.Parameters.Count | Should -Be 2
+        It 'Should expose the config sources plus the cleanup parameters in the param block' {
+            # InputJson, ConfigFile (config sources) + CleanupAdminsOnly, StateFile (JIT admin cleanup mode).
+            $paramBlock.Parameters.Count | Should -Be 4
+            $names = $paramBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
+            $names | Should -Contain 'InputJson'
+            $names | Should -Contain 'ConfigFile'
+            $names | Should -Contain 'CleanupAdminsOnly'
+            $names | Should -Contain 'StateFile'
         }
     }
 
@@ -1162,6 +1168,119 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'Not found</div>'
             $scriptContent | Should -Match "\`$r\.Outcome -eq 'AccessDenied'"
             $scriptContent | Should -Match "\`$r\.Outcome -eq 'NotFound'"
+        }
+    }
+
+    Context 'JIT site collection admin (AddSiteCollectionAdmin)' {
+
+        BeforeAll {
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            $wanted = 'Test-IsAccessDeniedError', 'Remove-OperatorSiteAdmin', 'Save-AdminGrantRecord', 'Get-AdminGrantRecords'
+            $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
+            foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
+
+            # Untyped stubs shadow the typed PnP cmdlets (function beats cmdlet in command
+            # resolution), so we can drive Remove-OperatorSiteAdmin without a real PnPConnection.
+            # $script:removeBehavior controls the simulated Remove-PnPSiteCollectionAdmin outcome.
+            function Get-PnPAccessToken { param([Parameter(ValueFromRemainingArguments = $true)] $rest) 'tok' }
+            function Connect-PnPOnline { param([Parameter(ValueFromRemainingArguments = $true)] $rest) }
+            function Remove-PnPSiteCollectionAdmin {
+                param([Parameter(ValueFromRemainingArguments = $true)] $rest)
+                switch ($script:removeBehavior) {
+                    'denied' { throw 'Attempted to perform an unauthorized operation.' }
+                    'fail' { throw 'Service unavailable (503).' }
+                    default { }
+                }
+            }
+        }
+
+        It 'Defines the JIT helper functions' {
+            $scriptContent | Should -Match 'function\s+Get-OperatorUpnFromConnection'
+            $scriptContent | Should -Match 'function\s+Test-IsSharePointAdmin'
+            $scriptContent | Should -Match 'function\s+Test-OperatorIsSiteAdmin'
+            $scriptContent | Should -Match 'function\s+Add-OperatorSiteAdmin'
+            $scriptContent | Should -Match 'function\s+Remove-OperatorSiteAdmin'
+            $scriptContent | Should -Match 'function\s+Save-AdminGrantRecord'
+            $scriptContent | Should -Match 'function\s+Get-AdminGrantRecords'
+        }
+
+        It 'Parses AddSiteCollectionAdmin (default false) and exposes -CleanupAdminsOnly / -StateFile' {
+            $scriptContent | Should -Match "config\.PSObject\.Properties\['AddSiteCollectionAdmin'\]"
+            $scriptContent | Should -Match '\$CleanupAdminsOnly'
+            $scriptContent | Should -Match '\$StateFile'
+        }
+
+        It 'Enforces prerequisites: TenantAdminUrl, SharePoint Admin role, app-only ignore' {
+            $scriptContent | Should -Match "AddSiteCollectionAdmin requires 'TenantAdminUrl'"
+            $scriptContent | Should -Match 'Test-IsSharePointAdmin -AdminUrl \$TenantAdminUrl'
+            $scriptContent | Should -Match 'AddSiteCollectionAdmin requires the SharePoint Administrator role'
+            $scriptContent | Should -Match 'AddSiteCollectionAdmin is ignored under app-only'
+        }
+
+        It 'Grants only when not already admin, journalling before the grant (crash-safety)' {
+            # The journal write (Save-AdminGrantRecord) must precede the grant (Add-OperatorSiteAdmin)
+            # so an interrupted run can always be cleaned up.
+            $idxProbe = $scriptContent.IndexOf('if (Test-OperatorIsSiteAdmin -SiteUrl $SiteUrl')
+            $idxJournal = $scriptContent.IndexOf('Save-AdminGrantRecord -Path $script:AdminGrantStateFile')
+            $idxGrant = $scriptContent.IndexOf('Add-OperatorSiteAdmin -SiteUrl $SiteUrl')
+            $idxProbe | Should -BeGreaterThan 0
+            $idxJournal | Should -BeGreaterThan 0
+            $idxGrant | Should -BeGreaterThan 0
+            $idxJournal | Should -BeLessThan $idxGrant
+        }
+
+        It 'Revokes in the per-site finally block (only when granted here)' {
+            $scriptContent | Should -Match 'if \(\$siteWasGranted\) \{[\s\S]*Remove-OperatorSiteAdmin -SiteUrl \$SiteUrl'
+        }
+
+        It 'Implements the -CleanupAdminsOnly replay mode' {
+            $scriptContent | Should -Match 'if \(\$CleanupAdminsOnly\) \{'
+            $scriptContent | Should -Match 'Get-AdminGrantRecords -Path \$stateToUse'
+            $scriptContent | Should -Match 'CleanupAdminsOnly finished:'
+        }
+
+        It 'Surfaces JIT counters and warns when a revoke failed (audit)' {
+            $scriptContent | Should -Match '\$script:JitRevokeFailed'
+            $scriptContent | Should -Match 'could NOT be revoked'
+            $scriptContent | Should -Match 're-run with -CleanupAdminsOnly|Re-run with -CleanupAdminsOnly|-CleanupAdminsOnly'
+        }
+
+        It 'Save/Get-AdminGrantRecord round-trips and de-duplicates' {
+            $tmp = New-Item -Path (Join-Path ([System.IO.Path]::GetTempPath()) ("jit-" + [guid]::NewGuid().ToString('N') + '.jsonl')) -ItemType File -Force
+            try {
+                Save-AdminGrantRecord -Path $tmp.FullName -SiteUrl 'https://c.sharepoint.com/sites/A' -OperatorUpn 'op@c.com'
+                Save-AdminGrantRecord -Path $tmp.FullName -SiteUrl 'https://c.sharepoint.com/sites/B' -OperatorUpn 'op@c.com'
+                Save-AdminGrantRecord -Path $tmp.FullName -SiteUrl 'https://c.sharepoint.com/sites/A' -OperatorUpn 'op@c.com'
+                $recs = Get-AdminGrantRecords -Path $tmp.FullName
+                @($recs).Count | Should -Be 2
+                ($recs | ForEach-Object { $_.Site }) | Should -Contain 'https://c.sharepoint.com/sites/A'
+                ($recs | ForEach-Object { $_.Site }) | Should -Contain 'https://c.sharepoint.com/sites/B'
+            }
+            finally { Remove-Item $tmp.FullName -Force -ErrorAction SilentlyContinue }
+        }
+
+        It 'Get-AdminGrantRecords returns empty for a missing file and skips malformed lines' {
+            Get-AdminGrantRecords -Path (Join-Path ([System.IO.Path]::GetTempPath()) 'does-not-exist.jsonl') | Should -HaveCount 0
+            $tmp = New-Item -Path (Join-Path ([System.IO.Path]::GetTempPath()) ("jit-" + [guid]::NewGuid().ToString('N') + '.jsonl')) -ItemType File -Force
+            try {
+                Set-Content -Path $tmp.FullName -Value @('not json', '{"Site":"https://c/sites/A","Operator":"op@c.com"}', '{"Operator":"only-op"}') -Encoding UTF8
+                $recs = Get-AdminGrantRecords -Path $tmp.FullName
+                @($recs).Count | Should -Be 1
+            }
+            finally { Remove-Item $tmp.FullName -Force -ErrorAction SilentlyContinue }
+        }
+
+        It 'Remove-OperatorSiteAdmin is idempotent: access-denied on revoke means already-clean (true)' {
+            $script:removeBehavior = 'denied'
+            Remove-OperatorSiteAdmin -SiteUrl 'https://c/sites/A' -OperatorUpn 'op@c.com' -AdminConnection 'conn' | Should -BeTrue
+        }
+
+        It 'Remove-OperatorSiteAdmin returns true on a clean revoke and false on a genuine failure' {
+            $script:removeBehavior = 'ok'
+            Remove-OperatorSiteAdmin -SiteUrl 'https://c/sites/A' -OperatorUpn 'op@c.com' -AdminConnection 'conn' | Should -BeTrue
+            $script:removeBehavior = 'fail'
+            Remove-OperatorSiteAdmin -SiteUrl 'https://c/sites/A' -OperatorUpn 'op@c.com' -AdminConnection 'conn' | Should -BeFalse
         }
     }
 }

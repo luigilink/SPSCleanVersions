@@ -16,5 +16,6 @@
   "DryRun": true,
   "EnableReport": true,
   "EnumerateLibraries": false,
+  "AddSiteCollectionAdmin": false,
   "LogRetentionDays": 180
 }

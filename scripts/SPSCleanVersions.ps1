@@ -74,12 +74,24 @@
       - EnumerateLibraries    (boolean, optional, default: false) — site version policy modes
                               only; also list the in-scope document libraries as informative
                               'InScope' report rows (adds a Get-PnPList call per site).
+      - AddSiteCollectionAdmin (boolean, optional, default: false) — delegated runs only. When
+                              true, temporarily add the signed-in operator as site collection
+                              administrator on each site it is not already an admin of, process the
+                              site, then revoke. Requires 'TenantAdminUrl' and the SharePoint
+                              Administrator role. Ignored under app-only (Azure Automation).
       - LogRetentionDays      (integer, optional, default: 180) — prune Logs/ and Results/ files
                               older than this many days (local only). 0 disables pruning.
 
-    .PARAMETER ConfigFile
-    Path to a local JSON file containing the same configuration schema as -InputJson.
-    Ideal for local execution and testing. The file is read and parsed with
+    .PARAMETER CleanupAdminsOnly
+    Cleanup mode for the AddSiteCollectionAdmin feature. Revokes any site collection admin grants
+    left behind by a previous interrupted run: reads the grant state file (the newest
+    SPSCleanVersions-admins-*.jsonl in Logs/, or -StateFile) and removes the operator from each
+    recorded site, then exits without processing any policy. Requires the same config (ClientId,
+    TenantAdminUrl) as the original run.
+
+    .PARAMETER StateFile
+    Path to the admin-grant state file to replay with -CleanupAdminsOnly. Defaults to the most
+    recent SPSCleanVersions-admins-*.jsonl in the Logs/ folder.
     ConvertFrom-Json. Mutually exclusive with -InputJson. See
     Config/SPSCleanVersions.example.json for a template.
 
@@ -125,7 +137,15 @@ param
 
     [Parameter(HelpMessage = "Path to a local JSON configuration file (same schema as -InputJson)")]
     [System.String]
-    $ConfigFile
+    $ConfigFile,
+
+    [Parameter(HelpMessage = "Cleanup mode: revoke any site collection admin grants left behind by a previous interrupted run. Reads the grant state file (newest in Logs/, or -StateFile) and removes the operator from each recorded site, then exits without processing any policy.")]
+    [switch]
+    $CleanupAdminsOnly,
+
+    [Parameter(HelpMessage = "Path to the admin-grant state file to replay with -CleanupAdminsOnly. Defaults to the most recent SPSCleanVersions-admins-*.jsonl in the Logs/ folder.")]
+    [System.String]
+    $StateFile
 )
 
 #region --- Load and parse JSON input ---
@@ -217,6 +237,11 @@ else {
 [string]$ClientId             = if ($config.PSObject.Properties['ClientId'])               { $config.ClientId }               else { '' }
 [bool]$ForceDeleteOldVersions = if ($config.PSObject.Properties['ForceDeleteOldVersions']) { $config.ForceDeleteOldVersions } else { $false }
 [bool]$DryRun                 = if ($config.PSObject.Properties['DryRun'])                 { $config.DryRun }                 else { $false }
+# JIT (just-in-time) site collection admin. When $true (delegated runs only), the operator is
+# temporarily added as site collection administrator on each site it is not already an admin of,
+# the site is processed, then the grant is revoked. Requires the SharePoint Administrator role and
+# a TenantAdminUrl (the grant goes through the admin center). Ignored under app-only auth.
+[bool]$AddSiteCollectionAdmin = if ($config.PSObject.Properties['AddSiteCollectionAdmin']) { $config.AddSiteCollectionAdmin } else { $false }
 
 # Site version policy (Set-PnPSiteVersionPolicy) properties. VersionPolicyMode selects
 # the mechanism: 'Legacy' keeps the per-library Set-PnPList behaviour; the other modes
@@ -677,6 +702,7 @@ $script:RunTimestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $script:LogsFolder = $null
 $script:ResultsFolder = $null
 $script:TranscriptStarted = $false
+$script:AdminGrantStateFile = $null
 
 if (-not $script:IsAzureAutomationRun) {
     $scriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -686,8 +712,12 @@ if (-not $script:IsAzureAutomationRun) {
         if (-not (Test-Path -Path $dir)) { $null = New-Item -Path $dir -ItemType Directory -Force -WhatIf:$false }
     }
     Clear-OldRunFiles -Path $script:LogsFolder -Retention $LogRetentionDays -Filter '*.log'
+    Clear-OldRunFiles -Path $script:LogsFolder -Retention $LogRetentionDays -Filter '*.jsonl'
     Clear-OldRunFiles -Path $script:ResultsFolder -Retention $LogRetentionDays -Filter '*.html'
     Clear-OldRunFiles -Path $script:ResultsFolder -Retention $LogRetentionDays -Filter '*.json'
+    # Persistent state file for JIT admin grants (JSON-lines). One per run; used to clean up an
+    # interrupted run with -CleanupAdminsOnly.
+    $script:AdminGrantStateFile = Join-Path -Path $script:LogsFolder -ChildPath ("SPSCleanVersions-admins-$($script:RunTimestamp).jsonl")
     try {
         $transcriptPath = Join-Path -Path $script:LogsFolder -ChildPath ("SPSCleanVersions-$($script:RunTimestamp).log")
         Start-Transcript -Path $transcriptPath -IncludeInvocationHeader -WhatIf:$false | Out-Null
@@ -927,6 +957,197 @@ function Get-TenantSiteUrls {
     }
 }
 
+#region --- JIT site collection admin helpers ---
+# Just-in-time elevation for delegated runs: temporarily add the operator as site collection
+# admin on sites it cannot otherwise manage, then revoke. Design validated by a live POC:
+#  - grant via the admin center (Set-PnPTenantSite -Owners) is ADDITIVE and effective ~instantly;
+#  - revoke runs in the operator's own site context (Remove-PnPSiteCollectionAdmin); once the
+#    operator removes itself it loses site access, so a revoke replay returns access-denied — that
+#    is treated as "already clean" (idempotent);
+#  - grants are journalled to a persistent state file BEFORE the grant, so an interrupted run can
+#    be cleaned up with -CleanupAdminsOnly.
+
+function Get-OperatorUpnFromConnection {
+    <#
+        .SYNOPSIS
+        Returns the signed-in operator's UPN by decoding the SharePoint access token's `upn` claim.
+        Robust and context-independent (works the same on Windows and macOS, and does not depend on
+        the "current" PnP context which -ReturnConnection does not set).
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory = $true)] $Connection)
+    try {
+        $tok = Get-PnPAccessToken -Connection $Connection -ResourceTypeName SharePoint
+        $parts = ([string]$tok).Split('.')
+        if ($parts.Count -lt 2) { return $null }
+        $b = $parts[1].Replace('-', '+').Replace('_', '/')
+        switch ($b.Length % 4) { 2 { $b += '==' } 3 { $b += '=' } }
+        $claims = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)) | ConvertFrom-Json
+        foreach ($c in @($claims.upn, $claims.email, $claims.unique_name)) {
+            if (-not [string]::IsNullOrWhiteSpace($c)) { return [string]$c }
+        }
+        return $null
+    }
+    catch { return $null }
+}
+
+function Test-IsSharePointAdmin {
+    <#
+        .SYNOPSIS
+        Returns $true when the operator can act as a SharePoint Administrator, tested by a harmless
+        tenant-level read (Get-PnPTenantSite -Identity <adminUrl>) through the admin-center
+        connection. Used as a fail-fast pre-flight for AddSiteCollectionAdmin (the grant needs it).
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)] [string] $AdminUrl,
+        [Parameter(Mandatory = $true)] $Connection
+    )
+    try {
+        $null = Get-PnPTenantSite -Identity $AdminUrl -Connection $Connection -ErrorAction Stop
+        return $true
+    }
+    catch {
+        if (Test-IsAccessDeniedError -ErrorRecord $_) { return $false }
+        # A non-permission error (throttling, transient) should not be read as "not admin".
+        Write-Verbose "Test-IsSharePointAdmin: non-permission error ($($_.Exception.Message)); assuming role present."
+        return $true
+    }
+}
+
+function Test-OperatorIsSiteAdmin {
+    <#
+        .SYNOPSIS
+        Returns $true when the operator already has site collection admin (or owner) rights on the
+        site — determined by connecting to the site and attempting a privileged read
+        (Get-PnPSiteCollectionAdmin). Access-denied means "not admin". This resolves the chicken/egg
+        of "was the operator already an admin?" so we never revoke a pre-existing legitimate grant.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)] [string] $SiteUrl,
+        [Parameter(Mandatory = $true)] $AdminConnection
+    )
+    try {
+        $tok = Get-PnPAccessToken -Connection $AdminConnection -ResourceTypeName SharePoint
+        Connect-PnPOnline -Url $SiteUrl -AccessToken $tok -ErrorAction Stop
+        $null = Get-PnPSiteCollectionAdmin -ErrorAction Stop
+        return $true
+    }
+    catch {
+        if (Test-IsAccessDeniedError -ErrorRecord $_) { return $false }
+        # Unknown error: be conservative and treat as "not admin" so we attempt a grant rather than
+        # skip a site the operator actually cannot manage.
+        Write-Verbose "Test-OperatorIsSiteAdmin: unexpected error on ${SiteUrl} ($($_.Exception.Message)); treating as not-admin."
+        return $false
+    }
+}
+
+function Save-AdminGrantRecord {
+    <#
+        .SYNOPSIS
+        Appends one JSON-lines record to the persistent grant state file, written BEFORE the grant
+        so an interrupted run can always be cleaned up (crash-safety).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $SiteUrl,
+        [Parameter(Mandatory = $true)] [string] $OperatorUpn
+    )
+    $record = [ordered]@{ Site = $SiteUrl; Operator = $OperatorUpn; GrantedAt = (Get-Date).ToString('o') }
+    $json = ConvertTo-Json -InputObject $record -Compress
+    Add-Content -Path $Path -Value $json -Encoding UTF8 -WhatIf:$false
+}
+
+function Get-AdminGrantRecords {
+    <#
+        .SYNOPSIS
+        Reads the JSON-lines grant state file and returns the distinct { Site, Operator } grants to
+        revoke. Malformed lines are skipped.
+    #>
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param([Parameter(Mandatory = $true)] [string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $out = [System.Collections.Generic.List[object]]::new()
+    foreach ($line in (Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try { $r = $line | ConvertFrom-Json } catch { continue }
+        if (-not $r.Site -or -not $r.Operator) { continue }
+        $key = "$($r.Site)|$($r.Operator)"
+        if ($seen.Add($key)) { [void]$out.Add([PSCustomObject]@{ Site = [string]$r.Site; Operator = [string]$r.Operator }) }
+    }
+    return , $out.ToArray()
+}
+
+function Add-OperatorSiteAdmin {
+    <#
+        .SYNOPSIS
+        Grants the operator site collection admin on a site via the admin center (additive — does
+        not overwrite existing admins), then waits (short, bounded) until the grant is effective.
+        Returns $true on success.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)] [string] $SiteUrl,
+        [Parameter(Mandatory = $true)] [string] $OperatorUpn,
+        [Parameter(Mandatory = $true)] $AdminConnection,
+        [int] $MaxWaitSeconds = 30
+    )
+    Set-PnPTenantSite -Identity $SiteUrl -Owners $OperatorUpn -Connection $AdminConnection -ErrorAction Stop
+    # Propagation is effectively instant in testing, but wait briefly to be safe on slower tenants.
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt $MaxWaitSeconds) {
+        try {
+            $tok = Get-PnPAccessToken -Connection $AdminConnection -ResourceTypeName SharePoint
+            Connect-PnPOnline -Url $SiteUrl -AccessToken $tok -ErrorAction Stop
+            $null = Get-PnPWeb -ErrorAction Stop
+            return $true
+        }
+        catch { Start-Sleep -Seconds 3 }
+    }
+    return $false
+}
+
+function Remove-OperatorSiteAdmin {
+    <#
+        .SYNOPSIS
+        Revokes the operator's site collection admin on a site, from the operator's own site context
+        (Remove-PnPSiteCollectionAdmin). Idempotent: once the operator has removed itself it loses
+        site access, so an access-denied on a replay means "already revoked" and returns $true.
+        Returns $true when the site ends up clean, $false on a genuine failure.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)] [string] $SiteUrl,
+        [Parameter(Mandatory = $true)] [string] $OperatorUpn,
+        [Parameter(Mandatory = $true)] $AdminConnection
+    )
+    try {
+        $tok = Get-PnPAccessToken -Connection $AdminConnection -ResourceTypeName SharePoint
+        Connect-PnPOnline -Url $SiteUrl -AccessToken $tok -ErrorAction Stop
+        Remove-PnPSiteCollectionAdmin -Owners $OperatorUpn -ErrorAction Stop
+        return $true
+    }
+    catch {
+        if (Test-IsAccessDeniedError -ErrorRecord $_) {
+            # The operator can no longer access the site => it is no longer an admin => already clean.
+            Write-Verbose "Remove-OperatorSiteAdmin: access-denied on ${SiteUrl} — treating as already revoked."
+            return $true
+        }
+        Write-Warning "Failed to revoke site collection admin on ${SiteUrl}: $($_.Exception.Message)"
+        return $false
+    }
+}
+#endregion
+
 # For 'Selected' scope, normalize the explicit site URLs BEFORE signing in: strip sharing-link
 # query strings/fragments and de-duplicate. This also makes the sign-in anchor (SiteUrls[0]) a
 # clean, canonical URL. ('All' scope URLs come from Get-PnPTenantSite and are normalized after
@@ -945,6 +1166,35 @@ if ($SiteScope -eq 'Selected') {
     }
 }
 
+# --- JIT site collection admin: validate prerequisites and resolve effective state. The grant is
+# performed through the admin center, so it is a delegated-only capability that needs TenantAdminUrl
+# and the SharePoint Administrator role. Under app-only (Azure Automation) the app already has
+# tenant-wide rights, so the option is not applicable and is ignored with a warning.
+$script:JitAdminEnabled = $false
+$script:OperatorUpn = $null
+if ($AddSiteCollectionAdmin) {
+    if ($script:IsAzureAutomationRun) {
+        Write-Warning "AddSiteCollectionAdmin is ignored under app-only (Azure Automation) authentication: the app principal already has tenant-wide access and cannot self-elevate a user. Proceeding without JIT elevation."
+    }
+    else {
+        if ([string]::IsNullOrWhiteSpace($TenantAdminUrl)) {
+            throw "AddSiteCollectionAdmin requires 'TenantAdminUrl' (the grant is performed through the SharePoint admin center), e.g. https://contoso-admin.sharepoint.com."
+        }
+        $script:JitAdminEnabled = $true
+    }
+}
+# Cleanup mode replays revokes from a previous run's state file; it also needs the admin-center
+# sign-in and the operator UPN, and is a local (delegated) operation only.
+if ($CleanupAdminsOnly) {
+    if ($script:IsAzureAutomationRun) {
+        throw "-CleanupAdminsOnly is a local (delegated) operation and is not supported under Azure Automation."
+    }
+    if ([string]::IsNullOrWhiteSpace($TenantAdminUrl)) {
+        throw "-CleanupAdminsOnly requires 'TenantAdminUrl' to sign in to the admin center."
+    }
+}
+$script:NeedAdminCenter = $script:JitAdminEnabled -or [bool]$CleanupAdminsOnly
+
 # --- Local sign-in: sign in ONCE (interactive) before enumeration and the site loop, so the whole
 # run prompts a single time. This anchor connection serves the tenant enumeration directly (passed
 # as -Connection to Get-PnPTenantSite) and is the source of the delegated SharePoint token reused
@@ -956,9 +1206,11 @@ if (-not $script:IsAzureAutomationRun) {
     if ([string]::IsNullOrWhiteSpace($ClientId)) {
         throw "ClientId is required for local/interactive execution. Register an app once with 'Register-PnPEntraIDAppForInteractiveLogin' and pass its Client ID as the 'ClientId' config property."
     }
-    # Anchor on the admin center when we must enumerate the tenant (Get-PnPTenantSite needs it),
-    # otherwise on the first explicit site.
-    $anchorUrl = if ($SiteScope -eq 'All' -and -not [string]::IsNullOrWhiteSpace($TenantAdminUrl)) { $TenantAdminUrl }
+    # Anchor on the admin center when we must enumerate the tenant (Get-PnPTenantSite needs it) or
+    # when JIT admin / cleanup is active (the grant/revoke go through the admin center); otherwise on
+    # the first explicit site. The delegated SharePoint token is tenant-wide, so an admin-center
+    # anchor still serves every content site.
+    $anchorUrl = if (($SiteScope -eq 'All' -or $script:NeedAdminCenter) -and -not [string]::IsNullOrWhiteSpace($TenantAdminUrl)) { $TenantAdminUrl }
     elseif (@($SiteUrls).Count -gt 0) { @($SiteUrls)[0] }
     elseif (-not [string]::IsNullOrWhiteSpace($TenantAdminUrl)) { $TenantAdminUrl }
     else { $null }
@@ -973,6 +1225,52 @@ if (-not $script:IsAzureAutomationRun) {
             $script:DelegatedAuthConnection = $null
         }
     }
+    # JIT admin / cleanup need the shared admin-center connection: resolve the operator UPN, and for
+    # JIT confirm the SharePoint Administrator role up front (fail-fast) so we do not half-elevate a
+    # large batch.
+    if ($script:NeedAdminCenter) {
+        if ($null -eq $script:DelegatedAuthConnection) {
+            throw "This operation requires the single admin-center sign-in, which failed above. Resolve the sign-in and retry."
+        }
+        $script:OperatorUpn = Get-OperatorUpnFromConnection -Connection $script:DelegatedAuthConnection
+        if ([string]::IsNullOrWhiteSpace($script:OperatorUpn)) {
+            throw "Could not resolve the signed-in operator's UPN from the access token."
+        }
+        if ($script:JitAdminEnabled) {
+            if (-not (Test-IsSharePointAdmin -AdminUrl $TenantAdminUrl -Connection $script:DelegatedAuthConnection)) {
+                throw "AddSiteCollectionAdmin requires the SharePoint Administrator role for '$($script:OperatorUpn)' (needed to grant/revoke site collection admins). Assign the role or run without AddSiteCollectionAdmin."
+            }
+            Write-Output "JIT site collection admin enabled for operator '$($script:OperatorUpn)' (SharePoint Administrator confirmed). Grants are journalled to: $($script:AdminGrantStateFile)"
+        }
+    }
+}
+
+# --- Cleanup mode: replay revokes from a prior run's state file, then exit without processing.
+if ($CleanupAdminsOnly) {
+    $stateToUse = if (-not [string]::IsNullOrWhiteSpace($StateFile)) { $StateFile }
+    else {
+        $newest = Get-ChildItem -Path $script:LogsFolder -Filter 'SPSCleanVersions-admins-*.jsonl' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($newest) { $newest.FullName } else { $null }
+    }
+    if ([string]::IsNullOrWhiteSpace($stateToUse) -or -not (Test-Path -LiteralPath $stateToUse)) {
+        Write-Warning "-CleanupAdminsOnly: no grant state file found (looked for $($StateFile ? $StateFile : "SPSCleanVersions-admins-*.jsonl in $($script:LogsFolder)")). Nothing to clean up."
+        return
+    }
+    Write-Output "--- CleanupAdminsOnly: replaying admin-grant revocations from $stateToUse ---"
+    $records = Get-AdminGrantRecords -Path $stateToUse
+    Write-Output "Found $(@($records).Count) grant record(s) to revoke."
+    $revoked = 0; $revokeFailed = 0
+    foreach ($rec in $records) {
+        if (Remove-OperatorSiteAdmin -SiteUrl $rec.Site -OperatorUpn $rec.Operator -AdminConnection $script:DelegatedAuthConnection) {
+            Write-Output "  revoked (or already clean): $($rec.Site)"
+            $revoked++
+        }
+        else { $revokeFailed++ }
+    }
+    Write-Output "--- CleanupAdminsOnly finished: $revoked cleaned, $revokeFailed failed ---"
+    if ($script:TranscriptStarted) { try { Stop-Transcript -WhatIf:$false | Out-Null } catch { } }
+    return
 }
 
 # Resolve the list of sites to process. For 'All' scope, enumerate the tenant first, reusing
@@ -995,10 +1293,37 @@ if ($SiteScope -eq 'All') {
     }
 }
 
+$script:JitGranted = 0
+$script:JitRevoked = 0
+$script:JitRevokeFailed = 0
+
 foreach ($SiteUrl in $SiteUrls) {
     Write-Output "Processing Site: $SiteUrl"
+    $siteWasGranted = $false
 
     try {
+        # JIT site collection admin (delegated only): if the operator is not already an admin on this
+        # site, journal the grant (crash-safety) then elevate before processing. The grant is revoked
+        # in the finally block below. If the operator is already an admin we never grant (and never
+        # revoke), preserving a pre-existing legitimate access.
+        if ($script:JitAdminEnabled) {
+            if (Test-OperatorIsSiteAdmin -SiteUrl $SiteUrl -AdminConnection $script:DelegatedAuthConnection) {
+                Write-Output "`tJIT: operator is already a site collection admin; no grant needed."
+            }
+            else {
+                Save-AdminGrantRecord -Path $script:AdminGrantStateFile -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn
+                Write-Output "`tJIT: granting site collection admin ($($script:OperatorUpn)) ..."
+                $effective = Add-OperatorSiteAdmin -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn -AdminConnection $script:DelegatedAuthConnection
+                $siteWasGranted = $true
+                $script:JitGranted++
+                if (-not $effective) {
+                    Write-Warning "`tJIT grant not confirmed effective on $SiteUrl within the wait window; skipping processing (the grant will still be revoked)."
+                    Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'Failed' -Detail 'JIT admin grant not effective within the wait window; site skipped (grant will be revoked).'
+                    continue
+                }
+            }
+        }
+
         # Environment: Local vs Azure Automation
         if (Test-IsAzureAutomation) {
             Write-Output "Running in Azure Automation. Connecting via Managed Identity..."
@@ -1274,6 +1599,18 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
         }
     }
     finally {
+        # JIT revoke: remove the operator from this site if (and only if) we granted it here. Runs
+        # in finally so an exception during processing still triggers cleanup. Idempotent: an
+        # access-denied on revoke means the operator already lost access (already revoked).
+        if ($siteWasGranted) {
+            Write-Output "`tJIT: revoking site collection admin ($($script:OperatorUpn)) ..."
+            if (Remove-OperatorSiteAdmin -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn -AdminConnection $script:DelegatedAuthConnection) {
+                $script:JitRevoked++
+            }
+            else {
+                $script:JitRevokeFailed++
+            }
+        }
         Disconnect-PnPOnline
     }
 }
@@ -1334,6 +1671,12 @@ if ($sumAccessDenied -gt 0) {
 }
 if ($sumNotFound -gt 0) {
     Write-Warning "$sumNotFound site(s) were skipped as not found (404): the site does not exist, was deleted, or the URL is malformed. Verify those URLs (see the report for the list) — a canonical site URL is https://<tenant>.sharepoint.com/sites/<name> with no query string."
+}
+if ($script:JitAdminEnabled) {
+    Write-Output "JIT site collection admin: $($script:JitGranted) granted, $($script:JitRevoked) revoked, $($script:JitRevokeFailed) revoke-failed."
+    if ($script:JitRevokeFailed -gt 0) {
+        Write-Warning "$($script:JitRevokeFailed) site collection admin grant(s) could NOT be revoked. The operator '$($script:OperatorUpn)' may still be an administrator on those sites. Re-run with -CleanupAdminsOnly (state file: $($script:AdminGrantStateFile)) to remove them."
+    }
 }
 
 if ($script:TranscriptStarted) {

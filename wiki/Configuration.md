@@ -27,6 +27,7 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
   "SiteFilter": "<string>",
   "EnableReport": <boolean>,
   "EnumerateLibraries": <boolean>,
+  "AddSiteCollectionAdmin": <boolean>,
   "LogRetentionDays": <integer>
 }
 ```
@@ -49,6 +50,7 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 | `SiteFilter` | string | No | — | Optional server-side `-Filter` passed to `Get-PnPTenantSite` to narrow the enumeration when `SiteScope` is `All` (e.g. `"Url -like 'sales'"`). |
 | `EnableReport` | boolean | No | `true` | Write a local HTML report of the run to `Results/` (plus a machine-readable `SPSCleanVersions-<timestamp>.json` next to it). The report has **Site / Scope / Library / Outcome / Major / Minor / ExpireAfterDays / Detail** columns; Legacy mode reports one row per document library. **Local execution only** — no report is produced when running in Azure Automation. |
 | `EnumerateLibraries` | boolean | No | `false` | Site version policy modes only. When `true`, also list the document libraries *in scope* for each site as informative `InScope` rows in the report. The policy applies to existing libraries via an **asynchronous server job**, so these rows carry no per-library Applied/Failed status. Adds a `Get-PnPList` call per site — leave off for large tenant-scale runs. |
+| `AddSiteCollectionAdmin` | boolean | No | `false` | **Delegated runs only.** When `true`, temporarily add the signed-in operator as **site collection administrator** on each site it is not already an admin of, process the site, then revoke. Requires `TenantAdminUrl` and the **SharePoint Administrator** role (checked up front). Ignored under app-only (Azure Automation). See [JIT site collection admin](#jit-site-collection-admin-addsitecollectionadmin). |
 | `LogRetentionDays` | integer | No | `180` | Prune `Logs/` and `Results/` files older than this many days (local only). `0` disables pruning. |
 
 ## Version policy modes
@@ -90,8 +92,63 @@ as a **site collection administrator** on the affected sites (SharePoint admin c
 
 > Running as an **app-only** identity (Managed Identity or certificate) removes this
 > intersection — the app itself is the identity — so the site-admin requirement does not apply
-> there. It is specific to delegated (interactive/local) runs. An opt-in option to add the site
-> collection administrator automatically is planned for a future release.
+> there. It is specific to delegated (interactive/local) runs.
+
+## JIT site collection admin (AddSiteCollectionAdmin)
+
+Rather than pre-adding an operator as site collection admin on hundreds or thousands of sites by
+hand, set `"AddSiteCollectionAdmin": true` to have the script do it **just-in-time**, per site,
+and remove it afterwards. This is a **delegated-only** capability (an app-only identity already has
+tenant-wide access).
+
+**Per-site flow** (only when the operator is not already an admin):
+
+1. **Probe** — check whether the operator is already a site collection admin. If yes, the site is
+   processed normally and **never granted/revoked** (a pre-existing legitimate access is preserved).
+2. **Journal then grant** — the grant is written to a persistent state file
+   (`Logs/SPSCleanVersions-admins-<timestamp>.jsonl`) **before** the grant is applied, so an
+   interrupted run can always be cleaned up. The operator is then added as site collection admin
+   through the admin center (additive — existing admins are preserved).
+3. **Process** — apply the version policy / batch delete.
+4. **Revoke** — in a `finally` block, so cleanup happens even if processing throws.
+
+**Prerequisites** (checked up front — fail-fast):
+
+- `TenantAdminUrl` is required (the grant goes through the admin center).
+- The signed-in operator must hold the **SharePoint Administrator** role. If not, the run stops
+  immediately with a clear message rather than half-elevating a large batch.
+
+**Recovering from an interruption** — if the run is killed between a grant and its revoke, the
+operator may remain admin on some sites. Re-run with `-CleanupAdminsOnly` to revoke everything
+recorded in the state file:
+
+```powershell
+.\SPSCleanVersions.ps1 -ConfigFile '.\Config\contoso.json' -CleanupAdminsOnly
+```
+
+It replays the newest `SPSCleanVersions-admins-*.jsonl` in `Logs/` (or pass `-StateFile <path>`),
+removing the operator from each recorded site, then exits without processing any policy. It is
+**idempotent**: once the operator has removed itself it loses site access, so a revoke that returns
+access-denied is treated as *already clean*. The end-of-run summary reports
+`granted / revoked / revoke-failed`; a non-zero **revoke-failed** count triggers a warning telling
+you to run `-CleanupAdminsOnly`.
+
+> **Security note.** Grants are temporary and per-site, journalled for audit, and removed at the end
+> of each site. Only sites the operator was **not** already an admin of are touched. The operator
+> must be a SharePoint Administrator for the duration of the run.
+
+```json
+{
+  "SiteUrls": [ "https://contoso.sharepoint.com/sites/HR" ],
+  "TenantAdminUrl": "https://contoso-admin.sharepoint.com",
+  "VersionPolicyMode": "ExpireAfter",
+  "ExpireVersionsAfterDays": 365,
+  "KeepMajorVersions": 100,
+  "ApplyTo": "Both",
+  "AddSiteCollectionAdmin": true,
+  "DryRun": true
+}
+```
 
 ## Tenant-wide scope (SiteScope: All)
 

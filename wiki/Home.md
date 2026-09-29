@@ -15,6 +15,7 @@ SPSCleanVersions is a PowerShell script tool to clean Version History in your Sh
 * **Logging & HTML Report:** each run produces a per-site summary — a transcript, a self-contained HTML report and a machine-readable JSON (`SPSCleanVersions-<timestamp>.json`) locally, or the summary emitted to the job output stream in Azure Automation.
 * **Multi-Site Processing:** Pass multiple Site Collection URLs in the `SiteUrls` JSON array to process them in a single execution.
 * **Force Delete Old Versions:** Set `"ForceDeleteOldVersions": true` to trigger a batch delete job via `New-PnPSiteFileVersionBatchDeleteJob`. Requires delegated user context (automatically skipped in Azure Automation).
+* **JIT site collection admin:** Set `"AddSiteCollectionAdmin": true` (delegated) to temporarily add the operator as site collection admin on each site it does not administer, process it, then revoke — with a crash-safe state file and a `-CleanupAdminsOnly` recovery mode. Requires the SharePoint Administrator role.
 * **Azure Automation Ready:** Single string parameter avoids all runbook type limitations (arrays, switches, booleans).
 
 For details on usage, configuration, and parameters, explore the links below:
