@@ -1176,7 +1176,7 @@ Describe 'SPSCleanVersions Script' {
         BeforeAll {
             $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
             $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
-            $wanted = 'Test-IsAccessDeniedError', 'Remove-OperatorSiteAdmin', 'Save-AdminGrantRecord', 'Get-AdminGrantRecords'
+            $wanted = 'Test-IsAccessDeniedError', 'Remove-OperatorSiteAdmin', 'Save-AdminGrantRecord', 'Get-AdminGrantRecords', 'Test-UpnInAdminList'
             $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
             foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
 
@@ -1330,6 +1330,37 @@ Describe 'SPSCleanVersions Script' {
             Remove-OperatorSiteAdmin -SiteUrl 'https://c/sites/A' -OperatorUpn 'op@c.com' -AdminConnection 'conn' | Should -BeTrue
             $script:removeBehavior = 'fail'
             Remove-OperatorSiteAdmin -SiteUrl 'https://c/sites/A' -OperatorUpn 'op@c.com' -AdminConnection 'conn' | Should -BeFalse
+        }
+
+        It 'Test-OperatorIsSiteAdmin asserts UPN membership (reading the admin list is not enough)' {
+            # A read that succeeds but does not contain the operator must NOT be treated as "already
+            # admin" — this is the false-positive that let group members skip the grant and then fail.
+            $probe = ([regex]::Match($scriptContent, 'function Test-OperatorIsSiteAdmin[\s\S]*?\n\}')).Value
+            $probe | Should -Match 'Test-UpnInAdminList -Admins \$admins -OperatorUpn \$OperatorUpn'
+            $probe | Should -Not -Match 'return \$true\s*\n\s*\}\s*\n\s*catch'
+        }
+
+        It 'Test-UpnInAdminList matches claims LoginName, plain LoginName, and Email; rejects others' {
+            $upn = 'batchop@contoso.onmicrosoft.com'
+            $claims = [pscustomobject]@{ LoginName = "i:0#.f|membership|$upn"; Email = '' }
+            $byEmail = [pscustomobject]@{ LoginName = 'i:0#.f|membership|someone@contoso.com'; Email = $upn }
+            $plain = [pscustomobject]@{ LoginName = $upn; Email = $null }
+            $other = [pscustomobject]@{ LoginName = 'i:0#.f|membership|other@contoso.com'; Email = 'other@contoso.com' }
+            Test-UpnInAdminList -Admins @($other, $claims) -OperatorUpn $upn | Should -BeTrue
+            Test-UpnInAdminList -Admins @($byEmail) -OperatorUpn $upn | Should -BeTrue
+            Test-UpnInAdminList -Admins @($plain) -OperatorUpn $upn | Should -BeTrue
+            Test-UpnInAdminList -Admins @($other) -OperatorUpn $upn | Should -BeFalse
+            Test-UpnInAdminList -Admins @() -OperatorUpn $upn | Should -BeFalse
+            Test-UpnInAdminList -Admins $null -OperatorUpn $upn | Should -BeFalse
+        }
+
+        It 'Processing is wrapped in a bounded JIT grant-and-retry (once) on access-denied' {
+            # When a site the operator "already administers" still denies the privileged op, the run
+            # grants JIT and retries once instead of only recording AccessDenied.
+            $scriptContent | Should -Match '(?m)^\s*do \{\s*$'
+            $scriptContent | Should -Match '\} while \(\$retrySite\)'
+            $scriptContent | Should -Match 'and -not \$siteWasGranted\) \{'
+            $scriptContent | Should -Match '\$retrySite = \$true'
         }
     }
 }

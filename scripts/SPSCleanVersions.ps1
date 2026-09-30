@@ -1026,22 +1026,29 @@ function Test-IsSharePointAdmin {
 function Test-OperatorIsSiteAdmin {
     <#
         .SYNOPSIS
-        Returns $true when the operator already has site collection admin (or owner) rights on the
-        site — determined by connecting to the site and attempting a privileged read
-        (Get-PnPSiteCollectionAdmin). Access-denied means "not admin". This resolves the chicken/egg
-        of "was the operator already an admin?" so we never revoke a pre-existing legitimate grant.
+        Returns $true only when the operator is actually listed as a site collection administrator on
+        the site. It connects to the site, reads the admin list (Get-PnPSiteCollectionAdmin) and
+        checks the operator's UPN is present. This resolves the chicken/egg of "was the operator
+        already an admin?" so we never revoke a pre-existing legitimate grant.
+
+        Reading the admin list SUCCEEDING is NOT sufficient proof of admin rights: a user that owns or
+        is a member of the site's Microsoft 365 group can read the list without being a site
+        collection administrator, and would then fail the privileged operations we run. So we assert
+        membership, not merely that the read did not throw. Access-denied (cannot even read) also
+        means "not admin".
     #>
     [CmdletBinding()]
     [OutputType([bool])]
     param(
         [Parameter(Mandatory = $true)] [string] $SiteUrl,
+        [Parameter(Mandatory = $true)] [string] $OperatorUpn,
         [Parameter(Mandatory = $true)] $AdminConnection
     )
     try {
         $tok = Get-PnPAccessToken -Connection $AdminConnection -ResourceTypeName SharePoint
         Connect-PnPOnline -Url $SiteUrl -AccessToken $tok -ErrorAction Stop
-        $null = Get-PnPSiteCollectionAdmin -ErrorAction Stop
-        return $true
+        $admins = Get-PnPSiteCollectionAdmin -ErrorAction Stop
+        return (Test-UpnInAdminList -Admins $admins -OperatorUpn $OperatorUpn)
     }
     catch {
         if (Test-IsAccessDeniedError -ErrorRecord $_) { return $false }
@@ -1050,6 +1057,35 @@ function Test-OperatorIsSiteAdmin {
         Write-Verbose "Test-OperatorIsSiteAdmin: unexpected error on ${SiteUrl} ($($_.Exception.Message)); treating as not-admin."
         return $false
     }
+}
+
+function Test-UpnInAdminList {
+    <#
+        .SYNOPSIS
+        Returns $true when $OperatorUpn appears in a Get-PnPSiteCollectionAdmin result. Matches on the
+        claims LoginName (e.g. 'i:0#.f|membership|user@tenant') or the Email/LoginName equalling the
+        UPN, case-insensitively.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)] [AllowNull()] $Admins,
+        [Parameter(Mandatory = $true)] [string] $OperatorUpn
+    )
+    if ($null -eq $Admins -or [string]::IsNullOrWhiteSpace($OperatorUpn)) { return $false }
+    $upn = $OperatorUpn.Trim()
+    foreach ($a in @($Admins)) {
+        if ($null -eq $a) { continue }
+        $login = [string]$a.LoginName
+        $email = [string]$a.Email
+        if ($email -and $email.Equals($upn, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+        if ($login) {
+            if ($login.Equals($upn, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+            # Claims format: the UPN is the last '|'-delimited segment (i:0#.f|membership|user@tenant).
+            if ($login.EndsWith("|$upn", [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+        }
+    }
+    return $false
 }
 
 function Save-AdminGrantRecord {
@@ -1343,7 +1379,7 @@ foreach ($SiteUrl in $SiteUrls) {
         # in the finally block below. If the operator is already an admin we never grant (and never
         # revoke), preserving a pre-existing legitimate access.
         if ($script:JitAdminEnabled) {
-            if (Test-OperatorIsSiteAdmin -SiteUrl $SiteUrl -AdminConnection $script:DelegatedAuthConnection) {
+            if (Test-OperatorIsSiteAdmin -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn -AdminConnection $script:DelegatedAuthConnection) {
                 Write-Output "`tJIT: operator is already a site collection admin; no grant needed."
             }
             else {
@@ -1360,6 +1396,14 @@ foreach ($SiteUrl in $SiteUrls) {
             }
         }
 
+        # Resilient JIT retry: a site can pass the "already admin" probe yet still deny the
+        # privileged operations (e.g. the operator can read the admin list as a Microsoft 365
+        # group member without being an effective site collection admin). When that happens and
+        # we have not granted here yet, grant just-in-time and retry the site once. Body indentation
+        # is intentionally left at its original depth to keep here-strings and the diff intact.
+        do {
+            $retrySite = $false
+            try {
         # Environment: Local vs Azure Automation
         if (Test-IsAzureAutomation) {
             Write-Output "Running in Azure Automation. Connecting via Managed Identity..."
@@ -1600,6 +1644,32 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                 }
             }
         }
+            }
+            catch {
+                if ((Test-IsAccessDeniedError -ErrorRecord $_) -and $script:JitAdminEnabled -and -not (Test-IsAzureAutomation) -and -not $siteWasGranted) {
+                    # The pre-flight probe said the operator was already an admin, so we skipped the
+                    # grant - but the site denied the privileged operation. Grant just-in-time now and
+                    # retry once; the grant is revoked in the finally block like any other JIT grant.
+                    Save-AdminGrantRecord -Path $script:AdminGrantStateFile -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn
+                    Write-Warning "`tJIT: access denied on $SiteUrl though the operator appeared to be a site collection admin; granting site collection admin and retrying once..."
+                    $effective = Add-OperatorSiteAdmin -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn -AdminConnection $script:DelegatedAuthConnection
+                    $siteWasGranted = $true
+                    $script:JitGranted++
+                    if ($effective) {
+                        $retrySite = $true
+                    }
+                    else {
+                        Write-Warning "`tJIT grant not confirmed effective on $SiteUrl within the wait window; skipping processing (the grant will still be revoked)."
+                        Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'Failed' -Detail 'JIT admin grant not effective within the wait window; site skipped (grant will be revoked).'
+                    }
+                }
+                else {
+                    # Not a JIT-recoverable access denial (already granted, app-only, or a different
+                    # error): let the outer catch classify it (AccessDenied / NotFound / Failed).
+                    throw
+                }
+            }
+        } while ($retrySite)
     }
     catch {
         if (Test-IsAccessDeniedError -ErrorRecord $_) {
