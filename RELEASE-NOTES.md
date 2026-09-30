@@ -11,6 +11,10 @@
     read the admin list without being an effective admin (e.g. a Microsoft 365 group member) are no
     longer skipped and left in `Access denied`. As a safety net, a site that still denies a privileged
     operation despite looking already-administered is granted JIT admin and retried once, then revoked.
+  - **Batch delete "already in progress" no longer wastes retries.** When a prior file-version
+    batch-delete job is still running on a site, the rejection is detected and skipped (a benign
+    "already in progress" message) instead of being retried 5× with exponential backoff (~5 min/site)
+    and logged as `FAILED`.
 
 ## [3.3.0] - 2026-09-29
 

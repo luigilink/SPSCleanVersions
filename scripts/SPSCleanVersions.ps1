@@ -429,6 +429,24 @@ function Test-IsNotFoundError {
     return [bool]($message -match '(?i)(status code is "?NotFound"?|\b404\b)')
 }
 
+function Test-IsBatchDeleteInProgressError {
+    <#
+        .SYNOPSIS
+        Returns $true when New-PnPSiteFileVersionBatchDeleteJob reports that a previous file-version
+        batch-delete work item is still running on the site ("...the previous work item is still in
+        progress..."). A batch-delete job runs asynchronously for hours/days, so a freshly submitted
+        one is rejected until the prior job finishes. Retrying within a run's backoff window cannot
+        clear it, so it is treated as a non-retryable "already queued" state and skipped.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory = $true)] [System.Management.Automation.ErrorRecord] $ErrorRecord
+    )
+    $message = [string]$ErrorRecord.Exception.Message
+    return [bool]($message -match '(?i)previous work item is still in progress')
+}
+
 function Get-NormalizedSiteUrls {
     <#
         .SYNOPSIS
@@ -508,6 +526,13 @@ function Invoke-RetryCommand {
                 # and only slows the run down (previously 5x exponential backoff). Surface it
                 # immediately with actionable guidance instead.
                 Write-Warning "[$OperationName] authentication/token error: $($_.Exception.Message). Not retrying — check the ClientId / app registration / token audience."
+                throw
+            }
+            if (Test-IsBatchDeleteInProgressError -ErrorRecord $_) {
+                # A prior file-version batch-delete job is still running on this site (async, can take
+                # hours/days). A new one cannot start until it finishes, so retrying within this run's
+                # backoff window is futile (previously 5x exponential backoff). Fail fast; the caller
+                # records it as a benign "already in progress" skip.
                 throw
             }
             if ($attempt -ge $MaxRetries) { throw }
@@ -1639,7 +1664,16 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                             # of a bare warning that leaves no trace in the report/summary.
                             throw
                         }
-                        Write-Warning "`tFAILED to submit batch delete job for ${SiteUrl}: $($_.Exception.Message)"
+                        if (Test-IsBatchDeleteInProgressError -ErrorRecord $_) {
+                            # A previous batch-delete job is still running on this site (async, runs
+                            # for hours/days); a new one is rejected until it finishes. This is a
+                            # benign "already queued" state, not a failure — skip it without the
+                            # alarming FAILED warning and without burning retry backoff.
+                            Write-Output "`tBatch delete already in progress on ${SiteUrl} (a previous cleanup job is still running); skipped."
+                        }
+                        else {
+                            Write-Warning "`tFAILED to submit batch delete job for ${SiteUrl}: $($_.Exception.Message)"
+                        }
                     }
                 }
             }
