@@ -5,6 +5,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- SPSCleanVersions.ps1
+  - **JIT `AddSiteCollectionAdmin` — false-positive "already admin" no longer skips the grant.**
+    The pre-flight probe (`Test-OperatorIsSiteAdmin`) previously treated *any* successful read of the
+    site collection admin list as proof the operator was already an admin, so it skipped the grant. A
+    user that can read the list without being an effective admin (e.g. a member/owner of the site's
+    Microsoft 365 group) was wrongly detected as admin, the grant was skipped, and the privileged
+    operation then failed with *Access denied*. The probe now asserts the operator's **UPN is actually
+    present** in the admin list (claims `LoginName`, plain `LoginName`, or `Email`). As a safety net,
+    if a site still denies a privileged operation despite looking already-administered, the run now
+    **grants JIT admin and retries the site once** (then revokes as usual) instead of only recording
+    `AccessDenied`.
+  - **`New-PnPSiteFileVersionBatchDeleteJob` "previous work item is still in progress" is no longer
+    retried.** When a prior asynchronous batch-delete job is still running on a site (it can take
+    hours/days), a new one is rejected until it finishes. This was treated as a transient error and
+    retried 5× with exponential backoff (10/20/40/80/160s ≈ 5 min wasted per site) even though it
+    cannot clear within the run. It is now detected (`Test-IsBatchDeleteInProgressError`), **not
+    retried**, and reported as a benign *"already in progress; skipped"* message instead of a
+    `FAILED` warning.
+
 ## [3.3.0] - 2026-09-29
 
 ### Added
