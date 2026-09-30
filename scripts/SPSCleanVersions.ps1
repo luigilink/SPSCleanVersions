@@ -298,9 +298,71 @@ if ($DryRun) {
     $WhatIfPreference = $true
 }
 
-Write-Output "--- Starting SPSCleanVersions ---"
+#region --- Visual output helpers ---
+# Colour (ANSI via $PSStyle) on interactive VT consoles only; plain ASCII fallback for Azure
+# Automation, redirected output and non-VT hosts. OutputRendering='Host' keeps transcripts ANSI-free.
+# results.json / HTML report are built from $script:RunResults, not these lines, so they are unaffected.
+$script:VisualIsAutomation = (
+    -not [string]::IsNullOrEmpty($env:AZUREPS_HOST_ENVIRONMENT) -or
+    -not [string]::IsNullOrEmpty($env:AUTOMATION_ASSET_SANDBOX_ID) -or
+    -not [string]::IsNullOrEmpty($env:AUTOMATION_ASSET_ENDPOINT) -or
+    -not [string]::IsNullOrEmpty($env:MSI_ENDPOINT) -or
+    -not [string]::IsNullOrEmpty($env:IDENTITY_ENDPOINT)
+)
+if ($null -ne $PSStyle) { $PSStyle.OutputRendering = 'Host' }
+$script:UseColor = (-not $script:VisualIsAutomation) -and
+    ($null -ne $PSStyle) -and
+    (-not [Console]::IsOutputRedirected) -and
+    [bool]$Host.UI.SupportsVirtualTerminal
+
+function Write-SpsLine {
+    # One run line via Write-Output (kept in the output stream + transcript). -Kind picks a colour tag;
+    # colour only when $script:UseColor, else an ASCII-safe plain equivalent.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $Message,
+        [ValidateSet('site', 'ok', 'skip', 'warn', 'deny', 'info', 'title', 'jit')] [string] $Kind = 'info',
+        [switch] $Detail
+    )
+    $tag = switch ($Kind) {
+        'ok' { '[ ok ]' } 'skip' { '[skip]' } 'warn' { '[warn]' } 'deny' { '[deny]' } 'jit' { '[jit ]' } default { '' }
+    }
+    if ($script:UseColor) {
+        $s = $PSStyle
+        $c = switch ($Kind) {
+            'site' { $s.Foreground.BrightCyan }
+            'ok' { $s.Foreground.BrightGreen }
+            'skip' { $s.Foreground.BrightBlack }
+            'warn' { $s.Foreground.BrightYellow }
+            'deny' { $s.Foreground.BrightRed }
+            'jit' { $s.Foreground.BrightMagenta }
+            'title' { $s.Foreground.BrightWhite + $s.Bold }
+            default { $s.Foreground.White }
+        }
+        $r = $s.Reset
+        if ($Kind -eq 'site') { return (Write-Output ("{0}> {1}{2}" -f $c, $Message, $r)) }
+        if ($Kind -eq 'title') { return (Write-Output ("{0}{1}{2}" -f $c, $Message, $r)) }
+        $pad = if ($Detail) { '    ' } else { '' }
+        Write-Output ("{0}{1}{2}{3} {4}" -f $pad, $c, $tag, $r, $Message)
+    }
+    else {
+        if ($Kind -eq 'site') { return (Write-Output ("> {0}" -f $Message)) }
+        if ($Kind -eq 'title') { return (Write-Output $Message) }
+        $pad = if ($Detail) { "`t" } else { '' }
+        if ($tag) { Write-Output ("{0}{1} {2}" -f $pad, $tag, $Message) } else { Write-Output ("{0}{1}" -f $pad, $Message) }
+    }
+}
+
+function Write-SpsRule {
+    [CmdletBinding()] param([int] $Width = 60)
+    if ($script:UseColor) { Write-Output ($PSStyle.Foreground.BrightBlack + ('-' * $Width) + $PSStyle.Reset) }
+    else { Write-Output ('-' * $Width) }
+}
+#endregion
+
+Write-SpsLine -Kind title -Message '=== SPSCleanVersions ==='
 if ($WhatIfPreference) {
-    Write-Output "--- DryRun/WhatIf mode enabled: no changes will be applied ---"
+    Write-SpsLine -Kind info -Message 'DryRun/WhatIf mode enabled: no changes will be applied.'
 }
 
 # Disable PnP PowerShell update check to avoid interactive prompts in non-interactive environments (Azure Automation).
@@ -902,7 +964,7 @@ function Set-SiteVersionPolicy {
 
     if ($PSCmdlet.ShouldProcess($SiteUrl, "Set site version policy ($Mode, ApplyTo=$ApplyTo)")) {
         Invoke-RetryCommand -OperationName "Set-PnPSiteVersionPolicy ($Mode)" -ScriptBlock { Set-PnPSiteVersionPolicy @params -ErrorAction Stop }
-        Write-Output "`tSite version policy applied: Mode=$Mode; ApplyTo=$ApplyTo"
+        Write-SpsLine -Detail -Kind ok -Message "Site version policy applied: Mode=$Mode; ApplyTo=$ApplyTo"
     }
 }
 
@@ -1394,8 +1456,19 @@ $script:JitGranted = 0
 $script:JitRevoked = 0
 $script:JitRevokeFailed = 0
 
+# Per-site progress bar (interactive/local only; noise in Azure Automation job output).
+$script:TotalSites = @($SiteUrls).Count
+$script:SiteIndex = 0
+
 foreach ($SiteUrl in $SiteUrls) {
-    Write-Output "Processing Site: $SiteUrl"
+    $script:SiteIndex++
+    if (-not $script:VisualIsAutomation) {
+        $pct = if ($script:TotalSites -gt 0) { [int](($script:SiteIndex / $script:TotalSites) * 100) } else { 0 }
+        Write-Progress -Id 1 -Activity "SPSCleanVersions ($VersionPolicyMode)" `
+            -Status "Site $($script:SiteIndex) of $($script:TotalSites): $SiteUrl" `
+            -PercentComplete $pct
+    }
+    Write-SpsLine -Kind site -Message $SiteUrl
     $siteWasGranted = $false
 
     try {
@@ -1405,11 +1478,11 @@ foreach ($SiteUrl in $SiteUrls) {
         # revoke), preserving a pre-existing legitimate access.
         if ($script:JitAdminEnabled) {
             if (Test-OperatorIsSiteAdmin -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn -AdminConnection $script:DelegatedAuthConnection) {
-                Write-Output "`tJIT: operator is already a site collection admin; no grant needed."
+                Write-SpsLine -Detail -Kind skip -Message 'JIT: operator is already a site collection admin; no grant needed.'
             }
             else {
                 Save-AdminGrantRecord -Path $script:AdminGrantStateFile -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn
-                Write-Output "`tJIT: granting site collection admin ($($script:OperatorUpn)) ..."
+                Write-SpsLine -Detail -Kind jit -Message "JIT: granting site collection admin ($($script:OperatorUpn)) ..."
                 $effective = Add-OperatorSiteAdmin -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn -AdminConnection $script:DelegatedAuthConnection
                 $siteWasGranted = $true
                 $script:JitGranted++
@@ -1462,7 +1535,7 @@ foreach ($SiteUrl in $SiteUrls) {
         if ($VersionPolicyMode -eq 'Legacy') {
             # --- Legacy mode: per-library count-based limits via Set-PnPList ---
             # Get all Lists in the Site
-            Write-Output "Retrieving lists from $SiteUrl..."
+            Write-SpsLine -Detail -Kind info -Message "Retrieving lists from $SiteUrl..."
             $allLists = Invoke-RetryCommand -OperationName 'Get-PnPList' -ScriptBlock { Get-PnPList -ErrorAction Stop }
             $targetLists = $allLists | Where-Object {
                 $_.Hidden -eq $false -and
@@ -1483,13 +1556,13 @@ foreach ($SiteUrl in $SiteUrls) {
 
                 $minorReported = if ($minorDesired) { "$KeepMinorVersions" } else { '0' }
                 if (-not $changeNeeded) {
-                    Write-Output "`t$($list.Title) already compliant"
+                    Write-SpsLine -Detail -Kind skip -Message "$($list.Title) already compliant"
                     $legacyCompliant++
                     Add-RunResult -SiteUrl $SiteUrl -Scope 'Legacy' -Library $list.Title -Outcome 'Compliant' `
                         -Major "$KeepMajorVersions" -Minor $minorReported -Detail 'Already compliant'
                 }
                 elseif ($WhatIfPreference) {
-                    Write-Output "`t$($list.Title) -> would set Major=$KeepMajorVersions; MinorEnabled=$minorDesired; MinorLimit=$KeepMinorVersions (DryRun)"
+                    Write-SpsLine -Detail -Kind info -Message "$($list.Title) -> would set Major=$KeepMajorVersions; MinorEnabled=$minorDesired; MinorLimit=$KeepMinorVersions (DryRun)"
                     $legacyWouldApply++
                     Add-RunResult -SiteUrl $SiteUrl -Scope 'Legacy' -Library $list.Title -Outcome 'WouldApply' `
                         -Major "$KeepMajorVersions" -Minor $minorReported `
@@ -1511,14 +1584,14 @@ foreach ($SiteUrl in $SiteUrls) {
                     # Keep the ShouldProcess gate so -Confirm is honoured per library. DryRun is
                     # handled above via $WhatIfPreference; here we only reach the real mutation.
                     if (-not $PSCmdlet.ShouldProcess($list.Title, 'Set versioning policy')) {
-                        Write-Output "`t$($list.Title) -> change declined (not confirmed); skipped."
+                        Write-SpsLine -Detail -Kind skip -Message "$($list.Title) -> change declined (not confirmed); skipped."
                         Add-RunResult -SiteUrl $SiteUrl -Scope 'Legacy' -Library $list.Title -Outcome 'Skipped' `
                             -Major "$KeepMajorVersions" -Minor $minorReported -Detail 'Change declined at confirmation prompt.'
                         continue
                     }
                     try {
                         Invoke-RetryCommand -OperationName "Set-PnPList ($($list.Title))" -ScriptBlock { Set-PnPList @p -ErrorAction Stop }
-                        Write-Output "`t$($list.Title) -> Major=$KeepMajorVersions; MinorEnabled=$minorDesired; MinorLimit=$KeepMinorVersions"
+                        Write-SpsLine -Detail -Kind ok -Message "$($list.Title) -> Major=$KeepMajorVersions; MinorEnabled=$minorDesired; MinorLimit=$KeepMinorVersions"
                         $legacyApplied++
                         Add-RunResult -SiteUrl $SiteUrl -Scope 'Legacy' -Library $list.Title -Outcome 'Applied' `
                             -Major "$KeepMajorVersions" -Minor $minorReported -Detail "Set Major=$KeepMajorVersions, Minor=$minorReported"
@@ -1541,7 +1614,7 @@ foreach ($SiteUrl in $SiteUrls) {
                 }
             }
             $appliedWord = if ($WhatIfPreference) { "$legacyWouldApply would apply" } else { "$legacyApplied applied" }
-            Write-Output "`tLegacy summary for ${SiteUrl}: $appliedWord, $legacyCompliant compliant, $legacyFailed failed across $(@($targetLists).Count) library(ies)."
+            Write-SpsLine -Detail -Kind info -Message "Legacy summary for ${SiteUrl}: $appliedWord, $legacyCompliant compliant, $legacyFailed failed across $(@($targetLists).Count) library(ies)."
         }
         else {
             # --- Site version policy mode: Set-PnPSiteVersionPolicy at the site level ---
@@ -1562,10 +1635,10 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
 "@
             }
 
-            Write-Output "Checking site version policy on $SiteUrl (Mode=$VersionPolicyMode)..."
+            Write-SpsLine -Detail -Kind info -Message "Checking site version policy on $SiteUrl (Mode=$VersionPolicyMode)..."
             $expireReported = if ($VersionPolicyMode -eq 'NoExpiration') { '0' } elseif ($VersionPolicyMode -eq 'ExpireAfter') { "$ExpireVersionsAfterDays" } else { '' }
             if ($effectiveApplyTo -eq 'None') {
-                Write-Output "`tApp-only cannot target existing libraries; nothing to apply here. Skipped."
+                Write-SpsLine -Detail -Kind skip -Message 'App-only cannot target existing libraries; nothing to apply here. Skipped.'
                 Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$ApplyTo)" -Outcome 'Skipped' `
                     -Major "$KeepMajorVersions" -ExpireAfterDays $expireReported `
                     -Detail 'App-only: existing document libraries require a delegated context; run locally/interactively.'
@@ -1579,7 +1652,7 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
                         -ExpireAfterDays $ExpireVersionsAfterDays
                     if ($hasDrift) {
                         if ($WhatIfPreference) {
-                            Write-Output "`tDrift detected. Would apply site version policy (DryRun; no change made).$existingNote"
+                            Write-SpsLine -Detail -Kind info -Message "Drift detected. Would apply site version policy (DryRun; no change made).$existingNote"
                             Set-SiteVersionPolicy -SiteUrl $SiteUrl -Mode $VersionPolicyMode `
                                 -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
                                 -ExpireAfterDays $ExpireVersionsAfterDays -ApplyTo $effectiveApplyTo
@@ -1588,7 +1661,7 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
                                 -Detail "DryRun: would set Major=$KeepMajorVersions; ExpireAfterDays=$expireReported$existingNote"
                         }
                         else {
-                            Write-Output "`tDrift detected. Applying site version policy...$existingNote"
+                            Write-SpsLine -Detail -Kind info -Message "Drift detected. Applying site version policy...$existingNote"
                             Set-SiteVersionPolicy -SiteUrl $SiteUrl -Mode $VersionPolicyMode `
                                 -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions `
                                 -ExpireAfterDays $ExpireVersionsAfterDays -ApplyTo $effectiveApplyTo
@@ -1598,7 +1671,7 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
                         }
                     }
                     else {
-                        Write-Output "`tNo drift. Site version policy already compliant; skipped."
+                        Write-SpsLine -Detail -Kind skip -Message 'No drift. Site version policy already compliant; skipped.'
                         Add-RunResult -SiteUrl $SiteUrl -Scope "$VersionPolicyMode (ApplyTo=$effectiveApplyTo)" -Outcome 'Skipped' `
                             -Major "$KeepMajorVersions" -ExpireAfterDays $expireReported -Detail 'No drift; already compliant'
                     }
@@ -1650,13 +1723,13 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                 }
                 else {
                     try {
-                        Write-Output "`tStarting batch delete job for old file versions on $SiteUrl..."
+                        Write-SpsLine -Detail -Kind info -Message "Starting batch delete job for old file versions on $SiteUrl..."
                         $batchParams = @{
                             MajorVersionLimit           = $KeepMajorVersions
                             MajorWithMinorVersionsLimit = $KeepMinorVersions
                         }
                         Invoke-RetryCommand -OperationName 'New-PnPSiteFileVersionBatchDeleteJob' -ScriptBlock { New-PnPSiteFileVersionBatchDeleteJob @batchParams -Force -ErrorAction Stop }
-                        Write-Output "`tBatch delete job submitted successfully for $SiteUrl"
+                        Write-SpsLine -Detail -Kind ok -Message "Batch delete job submitted successfully for $SiteUrl"
                     }
                     catch {
                         if ((Test-IsAccessDeniedError -ErrorRecord $_) -or (Test-IsNotFoundError -ErrorRecord $_)) {
@@ -1669,7 +1742,7 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                             # for hours/days); a new one is rejected until it finishes. This is a
                             # benign "already queued" state, not a failure — skip it without the
                             # alarming FAILED warning and without burning retry backoff.
-                            Write-Output "`tBatch delete already in progress on ${SiteUrl} (a previous cleanup job is still running); skipped."
+                            Write-SpsLine -Detail -Kind skip -Message "Batch delete already in progress on ${SiteUrl} (a previous cleanup job is still running); skipped."
                         }
                         else {
                             Write-Warning "`tFAILED to submit batch delete job for ${SiteUrl}: $($_.Exception.Message)"
@@ -1743,7 +1816,7 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
         # in finally so an exception during processing still triggers cleanup. Idempotent: an
         # access-denied on revoke means the operator already lost access (already revoked).
         if ($siteWasGranted) {
-            Write-Output "`tJIT: revoking site collection admin ($($script:OperatorUpn)) ..."
+            Write-SpsLine -Detail -Kind jit -Message "JIT: revoking site collection admin ($($script:OperatorUpn)) ..."
             if (Remove-OperatorSiteAdmin -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn -AdminConnection $script:DelegatedAuthConnection) {
                 $script:JitRevoked++
                 # Durable tombstone: a revoked grant must not be replayed by a later -CleanupAdminsOnly.
@@ -1756,6 +1829,7 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
         Disconnect-PnPOnline
     }
 }
+if (-not $script:VisualIsAutomation) { Write-Progress -Id 1 -Activity 'SPSCleanVersions' -Completed }
 
 #region --- Report output ---
 # The HTML report is a local artifact only. In Azure Automation there is no persistent
@@ -1767,7 +1841,7 @@ if ($EnableReport -and -not $script:IsAzureAutomationRun -and $script:RunResults
     try {
         $reportPath = Join-Path -Path $script:ResultsFolder -ChildPath ("SPSCleanVersions-$($script:RunTimestamp).html")
         Set-Content -Path $reportPath -Value $reportHtml -Encoding UTF8 -Force -WhatIf:$false
-        Write-Output "HTML report written to: $reportPath"
+        Write-SpsLine -Kind info -Message "HTML report written to: $reportPath"
     }
     catch {
         Write-Warning "Unable to write HTML report: $($_.Exception.Message)"
@@ -1785,7 +1859,7 @@ if ($EnableReport -and -not $script:IsAzureAutomationRun) {
         $jsonRows = $script:RunResults.ToArray()
         $jsonPayload = if ($jsonRows.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $jsonRows -Depth 6 }
         Set-Content -Path $jsonPath -Value $jsonPayload -Encoding UTF8 -Force -WhatIf:$false
-        Write-Output "JSON results written to: $jsonPath"
+        Write-SpsLine -Kind info -Message "JSON results written to: $jsonPath"
     }
     catch {
         Write-Warning "Unable to write JSON results: $($_.Exception.Message)"
@@ -1802,7 +1876,19 @@ $sumNotFound = @($script:RunResults | Where-Object { $_.Outcome -eq 'NotFound' }
 $sumFailed = @($script:RunResults | Where-Object { $_.Outcome -eq 'Failed' }).Count
 $distinctSites = @($script:RunResults | Select-Object -ExpandProperty Site -Unique).Count
 $appliedPart = if ($WhatIfPreference) { "$sumWouldApply would apply" } else { "$sumApplied applied" }
+# Machine-readable anchor line (kept stable for log scrapers), then a compact colour summary.
 Write-Output "--- SPSCleanVersions finished: $distinctSites site(s), $($script:RunResults.Count) result(s) — $appliedPart, $sumSkipped skipped/compliant, $sumAccessDenied access-denied, $sumNotFound not-found, $sumFailed failed ---"
+Write-SpsRule
+Write-SpsLine -Kind title -Message "Summary - $distinctSites site(s), $($script:RunResults.Count) result(s)"
+Write-SpsLine -Detail -Kind ok   -Message $appliedPart
+Write-SpsLine -Detail -Kind skip -Message "$sumSkipped skipped/compliant"
+Write-SpsLine -Detail -Kind $(if ($sumAccessDenied -gt 0) { 'deny' } else { 'skip' }) -Message "$sumAccessDenied access-denied"
+Write-SpsLine -Detail -Kind $(if ($sumNotFound -gt 0) { 'warn' } else { 'skip' }) -Message "$sumNotFound not-found"
+Write-SpsLine -Detail -Kind $(if ($sumFailed -gt 0) { 'deny' } else { 'skip' }) -Message "$sumFailed failed"
+if ($script:JitAdminEnabled) {
+    Write-SpsLine -Detail -Kind jit -Message "JIT  $($script:JitGranted) granted - $($script:JitRevoked) revoked - $($script:JitRevokeFailed) revoke-failed"
+}
+Write-SpsRule
 if ($sumAccessDenied -gt 0) {
     if ($script:IsAzureAutomationRun) {
         Write-Warning "$sumAccessDenied site(s) were skipped due to access-denied under app-only authentication. Ensure the Managed Identity has the required SharePoint permission (Sites.FullControl.All), or run this mode locally/interactively with a site collection administrator (see the report for the list)."
@@ -1814,11 +1900,8 @@ if ($sumAccessDenied -gt 0) {
 if ($sumNotFound -gt 0) {
     Write-Warning "$sumNotFound site(s) were skipped as not found (404): the site does not exist, was deleted, or the URL is malformed. Verify those URLs (see the report for the list) — a canonical site URL is https://<tenant>.sharepoint.com/sites/<name> with no query string."
 }
-if ($script:JitAdminEnabled) {
-    Write-Output "JIT site collection admin: $($script:JitGranted) granted, $($script:JitRevoked) revoked, $($script:JitRevokeFailed) revoke-failed."
-    if ($script:JitRevokeFailed -gt 0) {
-        Write-Warning "$($script:JitRevokeFailed) site collection admin grant(s) could NOT be revoked. The operator '$($script:OperatorUpn)' may still be an administrator on those sites. Re-run with -CleanupAdminsOnly (state file: $($script:AdminGrantStateFile)) to remove them."
-    }
+if ($script:JitAdminEnabled -and $script:JitRevokeFailed -gt 0) {
+    Write-Warning "$($script:JitRevokeFailed) site collection admin grant(s) could NOT be revoked. The operator '$($script:OperatorUpn)' may still be an administrator on those sites. Re-run with -CleanupAdminsOnly (state file: $($script:AdminGrantStateFile)) to remove them."
 }
 
 if ($script:TranscriptStarted) {

@@ -516,8 +516,10 @@ Describe 'SPSCleanVersions Script' {
             $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
             $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
             # Set-SiteVersionPolicy now calls Invoke-RetryCommand (which uses Get-RetryAfterDelay
-            # and Test-IsAuthError), so dot-source those helpers too or the call would fail.
-            $wanted = 'Set-SiteVersionPolicy', 'Invoke-RetryCommand', 'Get-RetryAfterDelay', 'Test-IsAuthError'
+            # and Test-IsAuthError) and Write-SpsLine, so dot-source those helpers too or the call
+            # would fail. $script:UseColor defaults to plain output for the extracted helper.
+            $script:UseColor = $false
+            $wanted = 'Set-SiteVersionPolicy', 'Invoke-RetryCommand', 'Get-RetryAfterDelay', 'Test-IsAuthError', 'Write-SpsLine'
             $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
             foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
 
@@ -882,6 +884,55 @@ Describe 'SPSCleanVersions Script' {
                 $html = Export-SPSCleanVersionsReport -Results $script:sample -Version '3.1.0'
                 $html | Should -Match 'ATTENTION'
             }
+        }
+    }
+
+    Context 'Visual output helpers (functional)' {
+
+        BeforeAll {
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            $wanted = 'Write-SpsLine', 'Write-SpsRule'
+            $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
+            foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
+        }
+
+        It 'Defines Write-SpsLine and Write-SpsRule' {
+            $scriptContent | Should -Match 'function\s+Write-SpsLine'
+            $scriptContent | Should -Match 'function\s+Write-SpsRule'
+        }
+
+        It 'Plain mode ($UseColor=$false): emits ASCII tags, no ANSI escapes' {
+            $script:UseColor = $false
+            $site = Write-SpsLine -Kind site -Message 'https://c/sites/A'
+            $ok = Write-SpsLine -Kind ok -Message 'done' -Detail
+            $skip = Write-SpsLine -Kind skip -Message 'left as-is'
+            $site | Should -Be '> https://c/sites/A'
+            $ok | Should -Match '^\t\[ ok \] done$'
+            $skip | Should -Match '^\[skip\] left as-is$'
+            # No ANSI escape (0x1b) anywhere in plain mode.
+            ("$site$ok$skip") | Should -Not -Match ([char]27)
+        }
+
+        It 'Colored mode ($UseColor=$true): wraps in ANSI and resets' {
+            if ($null -eq $PSStyle) { Set-ItResult -Skipped -Because 'PSStyle not available'; return }
+            $script:UseColor = $true
+            $line = Write-SpsLine -Kind ok -Message 'done'
+            $line | Should -Match ([char]27)                     # contains an ANSI escape
+            $line | Should -Match ([regex]::Escape($PSStyle.Reset))
+            $line | Should -Match 'done'
+            $script:UseColor = $false
+        }
+
+        It 'Write-SpsRule renders a plain rule when not colored' {
+            $script:UseColor = $false
+            (Write-SpsRule -Width 10) | Should -Be ('-' * 10)
+        }
+
+        It 'Per-site Write-Progress is wired and gated out of Azure Automation' {
+            $scriptContent | Should -Match 'if \(-not \$script:VisualIsAutomation\) \{[\s\S]*Write-Progress -Id 1'
+            $scriptContent | Should -Match 'Write-Progress -Id 1 -Activity ''SPSCleanVersions'' -Completed'
+            $scriptContent | Should -Match '\$script:TotalSites = @\(\$SiteUrls\)\.Count'
         }
     }
 
