@@ -5,6 +5,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- SPSCleanVersions.ps1
+  - **Colourized console output.** Per-site lines now carry coloured status tags — site (cyan),
+    grant/revoke (`[jit ]`, magenta), applied (`[ ok ]`, green), skipped/compliant (`[skip]`, grey),
+    warnings/denied (`[warn]`/`[deny]`) — plus a framed end-of-run **summary** block. Colour is
+    emitted as ANSI via `$PSStyle` **only** on an interactive VT-capable console; Azure Automation,
+    redirected/piped output and non-VT hosts get a plain ASCII fallback, and `Start-Transcript`
+    records the `.log` without ANSI (`OutputRendering = 'Host'`). `results.json` and the HTML report
+    are unchanged. The machine-readable `--- SPSCleanVersions finished: … ---` anchor line is kept.
+  - **Per-site progress bar** (`Write-Progress`, `Site X of N` + percent) for local/interactive runs;
+    suppressed under Azure Automation.
+
 ## [3.3.1] - 2026-09-30
 
 ### Fixed
