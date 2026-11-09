@@ -40,7 +40,7 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 | `KeepMajorVersions` | integer | No | `50` | Maximum number of major versions to retain. Maps to `-MajorVersions` in the site version policy modes. |
 | `KeepMinorVersions` | integer | No | `0` | Maximum number of minor versions to retain. Set to `0` to disable minor versioning. Maps to `-MajorWithMinorVersions` in the site version policy modes. |
 | `ClientId` | string | No | — | Azure AD App Registration Client ID used for authentication. Required for Interactive login (local) and optional for Managed Identity (Azure Automation). |
-| `ForceDeleteOldVersions` | boolean | No | `false` | When `true`, submits a batch delete job via `New-PnPSiteFileVersionBatchDeleteJob` to remove file versions exceeding the configured limits. **Requires delegated user context** — automatically skipped in Azure Automation. |
+| `ForceDeleteOldVersions` | boolean | No | `false` | When `true`, submits a **file version trim job** on each site (`New-PnPSiteFileVersionBatchDeleteJob`) so that **existing** versions are cleaned: a version policy only governs versions created afterwards. The job matches `VersionPolicyMode`: `ExpireAfter` trims **by age** (`ExpireVersionsAfterDays`), `AutoExpiration` uses the **automatic** algorithm, `Legacy` / `NoExpiration` / `InheritFromTenant` trim **by count** (`KeepMajorVersions` / `KeepMinorVersions`). See [Trimming existing versions](#trimming-existing-versions-forcedeleteoldversions). Deleted versions are **permanently deleted**. **Requires delegated user context** — automatically skipped in Azure Automation. |
 | `DryRun` | boolean | No | `false` | When `true`, simulates all changes without applying them. Use this instead of `-WhatIf` when running as an Azure Automation Runbook. |
 | `VersionPolicyMode` | string | No | `Legacy` | Version policy mechanism. `Legacy` keeps the per-library count-based `Set-PnPList` behaviour. `AutoExpiration`, `ExpireAfter`, `NoExpiration` and `InheritFromTenant` apply a site-level policy via `Set-PnPSiteVersionPolicy`. See [Version policy modes](#version-policy-modes). |
 | `ExpireVersionsAfterDays` | integer | No | `0` | Number of days after which versions expire. Used by `ExpireAfter` (must be **>= 30**). `NoExpiration` forces `0`. |
@@ -70,6 +70,33 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 > **Drift-based apply:** in the site version policy modes, the script first reads the current policy with `Get-PnPSiteVersionPolicy` and only calls `Set-PnPSiteVersionPolicy` when it differs from the desired settings (a *drift*). Sites that already match are logged as compliant and skipped. If the current policy cannot be read for a *transient* reason, the script fails safe and applies the policy anyway — **except** for a permission failure (*access denied*), which is never masked as drift: the site is recorded as `AccessDenied` and skipped (see [Site collection administrator requirement](#site-collection-administrator-requirement-delegated-runs)).
 
 > **ℹ️ Azure Automation / app-only behaviour:** `Get-PnPSiteVersionPolicy` and `Set-PnPSiteVersionPolicy` are documented as requiring a **delegated** context that is **site collection administrator**. Live testing with a **Managed Identity** (app-only) confirmed that **reads work** — `Get-PnPTenantSite` (for `SiteScope: All`) and `Get-PnPSiteVersionPolicy` (drift detection) both succeed app-only. **Writes** to existing document libraries may still require a delegated context and can fail with *"Attempted to perform an unauthorized operation"*; the script emits a warning in a runbook. If a write fails app-only, run the site version policy modes **interactively / locally** with a SharePoint Administrator account, or use the tenant-level `Set-PnPTenant` settings. The default `Legacy` mode is unaffected.
+
+## Trimming existing versions (`ForceDeleteOldVersions`)
+
+A version policy (site or library) only governs versions **created after it was applied**: the expiration date is stamped on each version when it is created, and existing versions are never revisited — they keep showing *Never expires* in the version history. Existing versions can only be cleaned by a **trim job**.
+
+With `ForceDeleteOldVersions: true`, the script submits one trim job per site. A job applies **one criterion**, so the script submits the job that matches `VersionPolicyMode`:
+
+| `VersionPolicyMode` | Trim job submitted | What it deletes |
+|---|---|---|
+| `ExpireAfter` | `New-PnPSiteFileVersionBatchDeleteJob -DeleteBeforeDays <ExpireVersionsAfterDays>` | Versions older than `ExpireVersionsAfterDays` days. |
+| `AutoExpiration` | `New-PnPSiteFileVersionBatchDeleteJob -Automatic` | Versions according to the automatic algorithm (it also sets expiration dates on the versions it keeps). |
+| `Legacy`, `NoExpiration` | `New-PnPSiteFileVersionBatchDeleteJob -MajorVersionLimit <KeepMajorVersions> -MajorWithMinorVersionsLimit <KeepMinorVersions>` | The oldest versions beyond the count limit. |
+| `InheritFromTenant` | same count-based job | The tenant policy is not read by the script, so the trim stays count-based. |
+
+The run log and the `DryRun` message tell which kind of job is submitted (`Age`, `Automatic` or `Count`).
+
+> **Permanent deletion:** versions deleted by a trim job bypass the recycle bin and cannot be recovered. Start with a test site, and use the version usage report (`New-SPOSiteFileVersionExpirationReportJob`) to estimate the impact first.
+
+> **Asynchronous, one job per site:** a trim job runs in the background (off-peak hours) and can take hours or days. A site accepts one trim job at a time: while a previous job is still running, a new request is skipped with an *already in progress* message. Track a job with `Get-SPOSiteFileVersionBatchDeleteJobProgress` (SharePoint Online Management Shell) or `Get-PnPSiteFileVersionBatchDeleteJobStatus` (connected to the site): the `BatchDeleteMode` and `DeleteOlderThanInUTC` fields tell which criterion was used.
+
+> **Age-based rules need a final pass:** with `ExpireAfter`, versions created before the policy was applied but newer than `ExpireVersionsAfterDays` at the time of the trim never receive an expiration date, so they are only removed by a later trim. Run the trim again about `ExpireVersionsAfterDays` days after the policy was activated. The `Automatic` and count-based jobs do not have this limitation.
+
+> **Count limit with `ExpireAfter`:** the age-based job does not enforce the count limit of the policy; SharePoint trims it progressively as files are edited. For an immediate count-based trim, run `New-PnPSiteFileVersionBatchDeleteJob -MajorVersionLimit <n> -MajorWithMinorVersionsLimit <n>` manually once the age-based job has finished.
+
+> **What a trim does not touch:** versions under a retention policy or an eDiscovery hold receive an expiration date instead of being deleted. Learn lists read-only, locked and archived sites as excluded from tenant-level trimming; plan to unlock a locked site before expecting its versions to be trimmed.
+
+See Microsoft Learn: [Set version limits for a document library](https://learn.microsoft.com/sharepoint/library-version-limits) and [Trim existing versions](https://learn.microsoft.com/sharepoint/trim-versions).
 
 ## Site collection administrator requirement (delegated runs)
 
@@ -307,7 +334,7 @@ Simulates the operation without making any changes. Ideal for testing.
 
 ### Force delete old versions (local only)
 
-Submits a batch delete job to remove old file versions exceeding the configured limits. This only works with delegated user context (local/interactive login).
+Submits a file version trim job on each site so that existing versions are cleaned. The job follows `VersionPolicyMode` (see [Trimming existing versions](#trimming-existing-versions-forcedeleteoldversions)); with the default `Legacy` mode it is a count-limit job. This only works with delegated user context (local/interactive login).
 
 ```json
 {
@@ -321,6 +348,20 @@ Submits a batch delete job to remove old file versions exceeding the configured 
 
 ```powershell
 .\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/News"],"KeepMajorVersions":50,"ForceDeleteOldVersions":true}'
+```
+
+With `ExpireAfter`, the same switch submits an **age-based** job, so versions older than `ExpireVersionsAfterDays` are deleted too:
+
+```json
+{
+  "SiteUrls": [
+    "https://contoso.sharepoint.com/sites/News"
+  ],
+  "VersionPolicyMode": "ExpireAfter",
+  "ExpireVersionsAfterDays": 365,
+  "KeepMajorVersions": 100,
+  "ForceDeleteOldVersions": true
+}
 ```
 
 ### Full configuration with Client ID
