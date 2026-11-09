@@ -52,7 +52,14 @@
                               execution) — Azure AD App Registration Client ID. Local runs
                               sign in interactively once via this app and reuse the
                               delegated token (auto-refreshed) across all sites.
-      - ForceDeleteOldVersions (boolean, optional, default: false) — Trigger batch delete of old file versions.
+      - ForceDeleteOldVersions (boolean, optional, default: false) — Submit a file-version trim job
+                              (New-PnPSiteFileVersionBatchDeleteJob) on each site so EXISTING versions
+                              are cleaned: a version policy only governs versions created afterwards.
+                              The job matches VersionPolicyMode: 'ExpireAfter' trims by age
+                              (ExpireVersionsAfterDays), 'AutoExpiration' uses the automatic algorithm,
+                              'Legacy', 'NoExpiration' and 'InheritFromTenant' trim by count
+                              (KeepMajorVersions / KeepMinorVersions). Versions deleted by a trim job
+                              are permanently deleted. Delegated context only.
       - DryRun                (boolean, optional, default: false) — Simulate changes without applying them.
       - VersionPolicyMode     (string, optional, default: 'Legacy') — Version policy mechanism.
                               'Legacy' keeps the per-library count-based Set-PnPList behaviour.
@@ -996,6 +1003,64 @@ function Resolve-EffectiveApplyTo {
     return $ApplyTo
 }
 
+function Get-VersionTrimJobPlan {
+    <#
+        .SYNOPSIS
+        Maps a version policy mode to the file-version trim job that matches it.
+
+        .DESCRIPTION
+        A version policy (site or library) only governs versions created after it was applied: the
+        expiration date is stamped on a version when it is created and existing versions are never
+        revisited. Existing versions can only be cleaned by a trim job, and
+        New-PnPSiteFileVersionBatchDeleteJob runs ONE criterion per job (-DeleteBeforeDays,
+        -Automatic, or the two count limits), so ForceDeleteOldVersions must submit the job that
+        matches the policy that was just applied:
+          ExpireAfter                              -> Age       (-DeleteBeforeDays <ExpireAfterDays>)
+          AutoExpiration                           -> Automatic (-Automatic)
+          Legacy / NoExpiration / InheritFromTenant -> Count     (-MajorVersionLimit / -MajorWithMinorVersionsLimit)
+        InheritFromTenant stays count-based because the tenant policy is not read by the script.
+        For ExpireAfter the count limit of the policy is not enforced by the age job; SharePoint
+        trims it progressively when files are edited.
+
+        Returns an object with Kind, Parameters (a splat table for the cmdlet) and Description.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param
+    (
+        [Parameter(Mandatory = $true)] [ValidateSet('Legacy', 'AutoExpiration', 'ExpireAfter', 'NoExpiration', 'InheritFromTenant')] [string] $Mode,
+        [Parameter()] [int] $MajorVersions = 50,
+        [Parameter()] [int] $MajorWithMinorVersions = 0,
+        [Parameter()] [int] $ExpireAfterDays = 0
+    )
+    switch ($Mode) {
+        'ExpireAfter' {
+            if ($ExpireAfterDays -lt 30) {
+                throw "Mode 'ExpireAfter' requires ExpireAfterDays greater than or equal to 30 (the age-based trim job cannot delete versions created in the last 30 days)."
+            }
+            return [pscustomobject]@{
+                Kind        = 'Age'
+                Parameters  = @{ DeleteBeforeDays = $ExpireAfterDays }
+                Description = "versions older than $ExpireAfterDays days"
+            }
+        }
+        'AutoExpiration' {
+            return [pscustomobject]@{
+                Kind        = 'Automatic'
+                Parameters  = @{ Automatic = $true }
+                Description = 'automatic version storage algorithm'
+            }
+        }
+        default {
+            return [pscustomobject]@{
+                Kind        = 'Count'
+                Parameters  = @{ MajorVersionLimit = $MajorVersions; MajorWithMinorVersionsLimit = $MajorWithMinorVersions }
+                Description = "keep the latest $MajorVersions major versions; minor versions kept for the latest $MajorWithMinorVersions"
+            }
+        }
+    }
+}
+
 function Get-TenantSiteUrls {
     <#
         .SYNOPSIS
@@ -1711,9 +1776,12 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
             }
         }
 
-        # Force deletion of old file version history
+        # Force deletion of old file version history. A version policy only governs versions created
+        # afterwards, so existing versions are cleaned by a trim job; submit the job that matches the
+        # policy mode (age / automatic / count) rather than always a count-limit one.
         if ($ForceDeleteOldVersions) {
-            if ($PSCmdlet.ShouldProcess($SiteUrl, "Delete old file version history")) {
+            $trimPlan = Get-VersionTrimJobPlan -Mode $VersionPolicyMode -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions -ExpireAfterDays $ExpireVersionsAfterDays
+            if ($PSCmdlet.ShouldProcess($SiteUrl, "Submit $($trimPlan.Kind) file version trim job ($($trimPlan.Description))")) {
                 if (Test-IsAzureAutomation) {
                     Write-Warning @"
 Batch delete of file versions is NOT supported with app-only authentication.
@@ -1723,13 +1791,10 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                 }
                 else {
                     try {
-                        Write-SpsLine -Detail -Kind info -Message "Starting batch delete job for old file versions on $SiteUrl..."
-                        $batchParams = @{
-                            MajorVersionLimit           = $KeepMajorVersions
-                            MajorWithMinorVersionsLimit = $KeepMinorVersions
-                        }
+                        Write-SpsLine -Detail -Kind info -Message "Starting $($trimPlan.Kind) trim job for existing file versions on $SiteUrl ($($trimPlan.Description))..."
+                        $batchParams = $trimPlan.Parameters
                         Invoke-RetryCommand -OperationName 'New-PnPSiteFileVersionBatchDeleteJob' -ScriptBlock { New-PnPSiteFileVersionBatchDeleteJob @batchParams -Force -ErrorAction Stop }
-                        Write-SpsLine -Detail -Kind ok -Message "Batch delete job submitted successfully for $SiteUrl"
+                        Write-SpsLine -Detail -Kind ok -Message "$($trimPlan.Kind) trim job submitted successfully for $SiteUrl"
                     }
                     catch {
                         if ((Test-IsAccessDeniedError -ErrorRecord $_) -or (Test-IsNotFoundError -ErrorRecord $_)) {

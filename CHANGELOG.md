@@ -5,6 +5,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- SPSCleanVersions.ps1
+  - **`ForceDeleteOldVersions` now submits the trim job that matches `VersionPolicyMode`** (#62). It always
+    submitted a count-limit job (`-MajorVersionLimit` / `-MajorWithMinorVersionsLimit`), so with
+    `ExpireAfter` the existing versions older than `ExpireVersionsAfterDays` were never trimmed: a version
+    policy only governs versions created afterwards (the expiration date is stamped at creation), and
+    existing versions keep showing *Never expires*. The job is now chosen by a new `Get-VersionTrimJobPlan`
+    helper: `ExpireAfter` → age (`-DeleteBeforeDays <ExpireVersionsAfterDays>`), `AutoExpiration` →
+    automatic algorithm (`-Automatic`), `Legacy` / `NoExpiration` / `InheritFromTenant` → count limits
+    (unchanged). **Behaviour change:** with `AutoExpiration` the job is no longer count-based. The run log
+    and the `DryRun` / `-WhatIf` message now tell which kind of job is submitted.
+
+### Documentation
+
+- Wiki (Configuration, Usage, Home) and script help: new *Trimming existing versions* section explaining that
+  a policy only applies to new versions, which trim job each mode submits, how to track it, and that an
+  age-based rule needs a final pass about `ExpireVersionsAfterDays` days after the policy was activated.
+
 ## [3.4.0] - 2026-09-30
 
 ### Added
