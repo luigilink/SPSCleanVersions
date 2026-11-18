@@ -785,6 +785,18 @@ Describe 'SPSCleanVersions Script' {
             ($rows | Where-Object Url -eq 'https://x/sites/C').Status | Should -Be 'AccessDenied'
         }
 
+        It 'Adds the error rows when no site could be read at all (the Rows list is still empty)' {
+            $rows = New-Object System.Collections.Generic.List[object]
+            $results = @(
+                [pscustomobject]@{ Site = 'https://x/sites/B'; Outcome = 'NotFound'; Detail = 'Site not found (404)' }
+                [pscustomobject]@{ Site = 'https://x/sites/C'; Outcome = 'AccessDenied'; Detail = 'Access denied' }
+            )
+            { Add-JobStatusErrorRows -Rows $rows -Results $results -ExportedAtUtc '2026-11-18 09:30:00' } | Should -Not -Throw
+            $rows.Count | Should -Be 2
+            @($rows | ForEach-Object { $_.Status }) | Should -Be @('NotFound', 'AccessDenied')
+            { Add-JobStatusErrorRows -Rows (New-Object System.Collections.Generic.List[object]) -Results @() } | Should -Not -Throw
+        }
+
         It 'Does not add a row for a site that was read, even if a later step failed' {
             $rows = New-Object System.Collections.Generic.List[object]
             $rows.Add((ConvertTo-JobStatusRow -SiteUrl 'https://x/sites/A' -Status $script:pnpStatus))
