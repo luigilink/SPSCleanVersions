@@ -98,13 +98,21 @@ Describe 'SPSCleanVersions Script' {
         }
 
         It 'Should expose the config sources plus the cleanup parameters in the param block' {
-            # InputJson, ConfigFile (config sources) + CleanupAdminsOnly, StateFile (JIT admin cleanup mode).
-            $paramBlock.Parameters.Count | Should -Be 4
+            # InputJson, ConfigFile (config sources) + CleanupAdminsOnly, StateFile (JIT admin cleanup mode)
+            # + ExportJobStatus (read-only job status report mode).
+            $paramBlock.Parameters.Count | Should -Be 5
             $names = $paramBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
             $names | Should -Contain 'InputJson'
             $names | Should -Contain 'ConfigFile'
             $names | Should -Contain 'CleanupAdminsOnly'
             $names | Should -Contain 'StateFile'
+            $names | Should -Contain 'ExportJobStatus'
+        }
+
+        It 'Should define ExportJobStatus as a switch' {
+            $p = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'ExportJobStatus' }
+            $p | Should -Not -BeNullOrEmpty
+            ($p.Attributes | Where-Object { $_ -is [System.Management.Automation.Language.TypeConstraintAst] }).TypeName.FullName | Should -Be 'switch'
         }
     }
 
@@ -447,6 +455,484 @@ Describe 'SPSCleanVersions Script' {
 
         It 'Rejects an unknown mode' {
             { Get-VersionTrimJobPlan -Mode 'Nope' } | Should -Throw
+        }
+    }
+
+    Context 'Trim options configuration (TrimJobMode, TrimOnly)' {
+
+        It 'Should default TrimJobMode to Auto and validate the allowed values' {
+            $scriptContent | Should -Match '\[string\]\$TrimJobMode\s*=\s*if \(\$config\.PSObject\.Properties\[''TrimJobMode''\]\)[^\r\n]*else \{ ''Auto'' \}'
+            $scriptContent | Should -Match '\$validTrimJobModes\s*=\s*@\(''Auto'', ''Age'', ''Count'', ''Automatic''\)'
+            $scriptContent | Should -Match 'Invalid ''TrimJobMode'' value'
+        }
+
+        It 'Should default TrimOnly to false' {
+            $scriptContent | Should -Match '\[bool\]\$TrimOnly\s*=\s*if \(\$config\.PSObject\.Properties\[''TrimOnly''\]\)[^\r\n]*else \{ \$false \}'
+        }
+
+        It 'Should allow SiteScope All with Legacy when the policy is bypassed (TrimOnly or -ExportJobStatus)' {
+            $scriptContent | Should -Match '\$SiteScope -eq ''All'' -and \$VersionPolicyMode -eq ''Legacy'' -and -not \$TrimOnly -and -not \$ExportJobStatus'
+        }
+
+        It 'Should validate the trim options once, before any sign-in' {
+            $assertAt = $scriptContent.IndexOf('Assert-TrimOptions -ForceDeleteOldVersions')
+            $signInAt = $scriptContent.IndexOf('Signing in once (interactive)')
+            $assertAt | Should -BeGreaterThan 0
+            $signInAt | Should -BeGreaterThan $assertAt
+        }
+
+        It 'Should bypass the version policy when TrimOnly or -ExportJobStatus is set' {
+            $scriptContent | Should -Match 'if \(\$ExportJobStatus\) \{'
+            $scriptContent | Should -Match 'elseif \(\$TrimOnly\) \{'
+            $scriptContent | Should -Match 'elseif \(\$VersionPolicyMode -eq ''Legacy''\) \{'
+        }
+
+        It 'Should never submit a trim job in -ExportJobStatus mode' {
+            $scriptContent | Should -Match 'if \(\$ForceDeleteOldVersions -and -not \$ExportJobStatus\) \{'
+        }
+
+        It 'Should pass TrimJobMode to the trim plan' {
+            $scriptContent | Should -Match 'Get-VersionTrimJobPlan\s+-Mode\s+\$VersionPolicyMode\s+-TrimJobMode\s+\$TrimJobMode'
+        }
+
+        It 'Should build the per-site trim plan without validation under Azure Automation' {
+            $scriptContent | Should -Match 'Get-VersionTrimJobPlan\s+-Mode\s+\$VersionPolicyMode\s+-TrimJobMode\s+\$TrimJobMode[^\r\n]*-SkipValidation:\(Test-IsAzureAutomation\)'
+        }
+
+        It 'Should record every trim job outcome in the results (report and JSON)' {
+            foreach ($o in 'Submitted', 'WouldSubmit', 'InProgress') {
+                $scriptContent | Should -Match "-Scope \`$trimScope -Outcome '$o'"
+            }
+            $scriptContent | Should -Match '-Scope \$trimScope -Outcome ''Failed'''
+            $scriptContent | Should -Match '-Scope \$trimScope -Outcome ''Skipped'''
+        }
+
+        It 'Should keep the stable run summary anchor line and add a separate trim jobs line' {
+            $scriptContent | Should -Match '--- SPSCleanVersions finished: \$distinctSites site\(s\), \$\(\$script:RunResults\.Count\) result\(s\) — \$appliedPart, \$sumSkipped skipped/compliant, \$sumAccessDenied access-denied, \$sumNotFound not-found, \$sumFailed failed ---'
+            $scriptContent | Should -Match '--- SPSCleanVersions trim jobs: \$sumSubmitted submitted'
+        }
+
+        It 'Should read the job state with Get-PnPSiteFileVersionBatchDeleteJobStatus and export it without being stopped by DryRun' {
+            $scriptContent | Should -Match 'Get-PnPSiteFileVersionBatchDeleteJobStatus -ErrorAction Stop'
+            $scriptContent | Should -Match 'Export-Csv -Path \$Path -NoTypeInformation -UseCulture -Encoding utf8BOM -WhatIf:\$false'
+            $scriptContent | Should -Match 'SPSCleanVersions-JobStatus-\$\(\$script:RunTimestamp\)\.csv'
+        }
+    }
+
+    Context 'Expiration window checks when the version policy is bypassed (functional)' {
+
+        BeforeAll {
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            # The real expiration window checks of the configuration parsing: every top-level statement that holds one of
+            # the two messages, whatever its shape (two plain if statements, or one wrapper that skips them).
+            $checks = @($ast.EndBlock.Statements | Where-Object { $_.Extent.Text -match 'must be 0 \(no expiration\)|requires ''ExpireVersionsAfterDays''' })
+            $script:guardText = ($checks | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine
+            function Invoke-ExpirationChecks($trimOnly, $exportJobStatus, $mode, $days) {
+                $TrimOnly = $trimOnly; $ExportJobStatus = $exportJobStatus; $VersionPolicyMode = $mode; $ExpireVersionsAfterDays = $days
+                . ([ScriptBlock]::Create($script:guardText))
+            }
+        }
+
+        It 'Finds the guard in the script' {
+            $script:guardText | Should -Not -BeNullOrEmpty
+        }
+
+        It 'TrimOnly with a count-based job does not need an expiration window (ExpireAfter policy left at 0 days)' {
+            { Invoke-ExpirationChecks $true $false 'ExpireAfter' 0 } | Should -Not -Throw
+        }
+
+        It '-ExportJobStatus does not need an expiration window either' {
+            { Invoke-ExpirationChecks $false $true 'ExpireAfter' 0 } | Should -Not -Throw
+        }
+
+        It 'A value that would be refused for a policy is accepted when the policy is bypassed' {
+            { Invoke-ExpirationChecks $true $false 'Legacy' 15 } | Should -Not -Throw
+        }
+
+        It 'Still refuses ExpireAfter without a window when a policy is applied' {
+            { Invoke-ExpirationChecks $false $false 'ExpireAfter' 0 } | Should -Throw "*requires 'ExpireVersionsAfterDays'*"
+        }
+
+        It 'Still refuses a window between 1 and 29 days when a policy is applied' {
+            { Invoke-ExpirationChecks $false $false 'Legacy' 15 } | Should -Throw "*must be 0 (no expiration) or greater than or equal to 30*"
+        }
+
+        It 'Accepts a valid window when a policy is applied' {
+            { Invoke-ExpirationChecks $false $false 'ExpireAfter' 365 } | Should -Not -Throw
+        }
+    }
+
+    Context 'Get-VersionTrimJobPlan TrimJobMode and the 2023 cutoff (functional)' {
+
+        BeforeAll {
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-VersionTrimJobPlan' }, $true) | Select-Object -First 1
+            . ([ScriptBlock]::Create($fn.Extent.Text))
+
+            # Same stub as above: the three mutually exclusive parameter sets of the real cmdlet.
+            function New-PnPSiteFileVersionBatchDeleteJob {
+                [CmdletBinding(DefaultParameterSetName = 'CountLimits')]
+                param(
+                    [Parameter(ParameterSetName = 'AutomaticTrim', Mandatory = $true)] [switch] $Automatic,
+                    [Parameter(ParameterSetName = 'DeleteOlderThanDays', Mandatory = $true)] [int] $DeleteBeforeDays,
+                    [Parameter(ParameterSetName = 'CountLimits', Mandatory = $true)] [int] $MajorVersionLimit,
+                    [Parameter(ParameterSetName = 'CountLimits', Mandatory = $true)] [int] $MajorWithMinorVersionsLimit,
+                    [switch] $Force
+                )
+                $PSCmdlet.ParameterSetName
+            }
+            $script:now = [datetime]'2026-11-18'
+        }
+
+        It 'Auto (the default) follows the policy mode' {
+            (Get-VersionTrimJobPlan -Mode 'ExpireAfter' -ExpireAfterDays 365 -Now $script:now).Kind | Should -Be 'Age'
+            (Get-VersionTrimJobPlan -Mode 'AutoExpiration' -Now $script:now).Kind | Should -Be 'Automatic'
+            (Get-VersionTrimJobPlan -Mode 'Legacy' -Now $script:now).Kind | Should -Be 'Count'
+            (Get-VersionTrimJobPlan -Mode 'ExpireAfter' -TrimJobMode 'Auto' -ExpireAfterDays 365 -Now $script:now).Kind | Should -Be 'Age'
+        }
+
+        It 'Age forces the age-based job whatever the policy mode' {
+            $plan = Get-VersionTrimJobPlan -Mode 'Legacy' -TrimJobMode 'Age' -ExpireAfterDays 365 -MajorVersions 100 -Now $script:now
+            $plan.Kind | Should -Be 'Age'
+            $plan.Parameters.Keys | Should -Be @('DeleteBeforeDays')
+            $plan.Parameters.DeleteBeforeDays | Should -Be 365
+        }
+
+        It 'Count forces the count-limit job even in ExpireAfter mode' {
+            $plan = Get-VersionTrimJobPlan -Mode 'ExpireAfter' -TrimJobMode 'Count' -MajorVersions 100 -MajorWithMinorVersions 0 -ExpireAfterDays 365 -Now $script:now
+            $plan.Kind | Should -Be 'Count'
+            $plan.Parameters.MajorVersionLimit | Should -Be 100
+            $plan.Parameters.MajorWithMinorVersionsLimit | Should -Be 0
+            $plan.Parameters.ContainsKey('DeleteBeforeDays') | Should -BeFalse
+        }
+
+        It 'Automatic forces the automatic job even in ExpireAfter mode' {
+            $plan = Get-VersionTrimJobPlan -Mode 'ExpireAfter' -TrimJobMode 'Automatic' -ExpireAfterDays 365 -Now $script:now
+            $plan.Kind | Should -Be 'Automatic'
+            $plan.Parameters.Keys | Should -Be @('Automatic')
+        }
+
+        It '<Forced> binds to the matching cmdlet parameter set (<Set>), one criterion per job' -ForEach @(
+            @{ Forced = 'Age'; Set = 'DeleteOlderThanDays' }
+            @{ Forced = 'Count'; Set = 'CountLimits' }
+            @{ Forced = 'Automatic'; Set = 'AutomaticTrim' }
+        ) {
+            $plan = Get-VersionTrimJobPlan -Mode 'Legacy' -TrimJobMode $Forced -MajorVersions 100 -MajorWithMinorVersions 0 -ExpireAfterDays 365 -Now $script:now
+            $batchParams = $plan.Parameters
+            (New-PnPSiteFileVersionBatchDeleteJob @batchParams -Force) | Should -Be $Set
+        }
+
+        It 'Age needs 30 days or more, whatever the policy mode' {
+            { Get-VersionTrimJobPlan -Mode 'Legacy' -TrimJobMode 'Age' -ExpireAfterDays 0 -Now $script:now } | Should -Throw '*greater than or equal to 30*'
+            { Get-VersionTrimJobPlan -Mode 'Legacy' -TrimJobMode 'Age' -ExpireAfterDays 29 -Now $script:now } | Should -Throw '*greater than or equal to 30*'
+        }
+
+        It 'Age accepts a cutoff on January 1, 2023 and refuses an earlier one (the service deletes everything before that date)' {
+            $maxDays = ($script:now - [datetime]'2023-01-01').Days
+            (Get-VersionTrimJobPlan -Mode 'ExpireAfter' -ExpireAfterDays $maxDays -Now $script:now).Parameters.DeleteBeforeDays | Should -Be $maxDays
+            { Get-VersionTrimJobPlan -Mode 'ExpireAfter' -ExpireAfterDays ($maxDays + 1) -Now $script:now } | Should -Throw '*January 1, 2023*'
+        }
+
+        It '-SkipValidation builds the plan without the 30-day and January 1, 2023 checks (Azure Automation never submits it)' {
+            $plan = Get-VersionTrimJobPlan -Mode 'ExpireAfter' -ExpireAfterDays 2000 -Now $script:now -SkipValidation
+            $plan.Kind | Should -Be 'Age'
+            $plan.Parameters.DeleteBeforeDays | Should -Be 2000
+            (Get-VersionTrimJobPlan -Mode 'Legacy' -TrimJobMode 'Age' -ExpireAfterDays 0 -Now $script:now -SkipValidation).Kind | Should -Be 'Age'
+        }
+
+        It '-SkipValidation still rejects an unknown mode and does not change the other plans' {
+            { Get-VersionTrimJobPlan -Mode 'Legacy' -TrimJobMode 'Nope' -SkipValidation } | Should -Throw
+            (Get-VersionTrimJobPlan -Mode 'AutoExpiration' -SkipValidation).Kind | Should -Be 'Automatic'
+            (Get-VersionTrimJobPlan -Mode 'Legacy' -MajorVersions 70 -SkipValidation).Parameters.MajorVersionLimit | Should -Be 70
+        }
+
+        It 'The 2023 refusal tells the largest accepted value' {
+            $maxDays = ($script:now - [datetime]'2023-01-01').Days
+            { Get-VersionTrimJobPlan -Mode 'ExpireAfter' -ExpireAfterDays 2000 -Now $script:now } | Should -Throw "*Use at most $maxDays days*"
+        }
+
+        It 'The 2023 limit only concerns the age-based job' {
+            { Get-VersionTrimJobPlan -Mode 'Legacy' -TrimJobMode 'Count' -ExpireAfterDays 5000 -Now $script:now } | Should -Not -Throw
+            { Get-VersionTrimJobPlan -Mode 'AutoExpiration' -ExpireAfterDays 5000 -Now $script:now } | Should -Not -Throw
+        }
+
+        It 'Rejects an unknown TrimJobMode' {
+            { Get-VersionTrimJobPlan -Mode 'Legacy' -TrimJobMode 'Nope' } | Should -Throw
+        }
+    }
+
+    Context 'Assert-TrimOptions (functional)' {
+
+        BeforeAll {
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            $wanted = 'Get-VersionTrimJobPlan', 'Assert-TrimOptions'
+            foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)) { . ([ScriptBlock]::Create($f.Extent.Text)) }
+            $script:now = [datetime]'2026-11-18'
+            # Baseline: a valid trim-only run with the age job; each test overrides what it checks.
+            $script:base = @{
+                ForceDeleteOldVersions = $true; TrimOnly = $true; ExportJobStatus = $false; CleanupAdminsOnly = $false
+                IsAzureAutomation = $false; VersionPolicyMode = 'ExpireAfter'; TrimJobMode = 'Age'
+                MajorVersions = 100; MajorWithMinorVersions = 0; ExpireAfterDays = 365; Now = $script:now
+            }
+        }
+
+        It 'Accepts a valid trim-only run' {
+            $a = $script:base.Clone()
+            { Assert-TrimOptions @a } | Should -Not -Throw
+        }
+
+        It 'TrimOnly needs ForceDeleteOldVersions (otherwise there is nothing to do)' {
+            $a = $script:base.Clone(); $a.ForceDeleteOldVersions = $false
+            { Assert-TrimOptions @a } | Should -Throw "*'TrimOnly' requires 'ForceDeleteOldVersions'*"
+        }
+
+        It 'TrimOnly needs a delegated run (the trim job API is not supported app-only)' {
+            $a = $script:base.Clone(); $a.IsAzureAutomation = $true
+            { Assert-TrimOptions @a } | Should -Throw '*delegated (local) run*'
+        }
+
+        It 'Validates the trim plan once, before any site (30-day minimum)' {
+            $a = $script:base.Clone(); $a.ExpireAfterDays = 0
+            { Assert-TrimOptions @a } | Should -Throw '*greater than or equal to 30*'
+        }
+
+        It 'Validates the trim plan once, before any site (January 1, 2023 limit)' {
+            $a = $script:base.Clone(); $a.TrimOnly = $false; $a.TrimJobMode = 'Auto'; $a.ExpireAfterDays = 2000
+            { Assert-TrimOptions @a } | Should -Throw '*January 1, 2023*'
+        }
+
+        It 'Under Azure Automation the plan is not validated: the job is never submitted there (cutoff before 2023, ExpireAfter)' {
+            $a = $script:base.Clone(); $a.TrimOnly = $false; $a.TrimJobMode = 'Auto'; $a.IsAzureAutomation = $true; $a.ExpireAfterDays = 2000
+            { Assert-TrimOptions @a } | Should -Not -Throw
+            $a.ExpireAfterDays = 0; $a.TrimJobMode = 'Age'
+            { Assert-TrimOptions @a } | Should -Not -Throw
+        }
+
+        It 'Still validates the plan locally for the same settings' {
+            $a = $script:base.Clone(); $a.TrimOnly = $false; $a.TrimJobMode = 'Auto'; $a.IsAzureAutomation = $false; $a.ExpireAfterDays = 2000
+            { Assert-TrimOptions @a } | Should -Throw '*January 1, 2023*'
+        }
+
+        It 'Does not need a plan when ForceDeleteOldVersions is false' {
+            $a = $script:base.Clone(); $a.ForceDeleteOldVersions = $false; $a.TrimOnly = $false; $a.TrimJobMode = 'Auto'; $a.ExpireAfterDays = 0
+            { Assert-TrimOptions @a } | Should -Not -Throw
+        }
+
+        It 'Warns, without failing, when TrimJobMode is set but ForceDeleteOldVersions is false' {
+            $a = $script:base.Clone(); $a.ForceDeleteOldVersions = $false; $a.TrimOnly = $false
+            { Assert-TrimOptions @a -WarningVariable w -WarningAction SilentlyContinue } | Should -Not -Throw
+            Assert-TrimOptions @a -WarningVariable w2 -WarningAction SilentlyContinue
+            "$w2" | Should -Match "'TrimJobMode' = 'Age' is ignored"
+        }
+
+        It '-ExportJobStatus is read-only: it ignores the trim options, even invalid ones' {
+            $a = $script:base.Clone(); $a.ExportJobStatus = $true; $a.ExpireAfterDays = 0
+            { Assert-TrimOptions @a } | Should -Not -Throw
+        }
+
+        It '-ExportJobStatus is a local (delegated) operation' {
+            $a = $script:base.Clone(); $a.ExportJobStatus = $true; $a.IsAzureAutomation = $true
+            { Assert-TrimOptions @a } | Should -Throw '*local (delegated) operation*'
+        }
+
+        It '-ExportJobStatus and -CleanupAdminsOnly are separate modes' {
+            $a = $script:base.Clone(); $a.ExportJobStatus = $true; $a.CleanupAdminsOnly = $true
+            { Assert-TrimOptions @a } | Should -Throw '*separate modes*'
+        }
+
+        It '-CleanupAdminsOnly only revokes grants: it does not check the trim plan' {
+            $a = $script:base.Clone(); $a.CleanupAdminsOnly = $true; $a.ExpireAfterDays = 0
+            { Assert-TrimOptions @a } | Should -Not -Throw
+        }
+    }
+
+    Context 'Job status export helpers (functional)' {
+
+        BeforeAll {
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            $wanted = 'ConvertTo-JobStatusRow', 'Add-JobStatusErrorRows', 'Get-JobStatusSummary', 'Export-JobStatusCsv'
+            foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)) { . ([ScriptBlock]::Create($f.Extent.Text)) }
+            # Same shape as PnP.PowerShell's FileVersionBatchDeleteJobStatus (every property is a string).
+            $script:pnpStatus = [pscustomobject]@{
+                Url = 'https://x/sites/A'; WorkItemId = 'w1'; Status = 'CompleteSuccess'; ErrorMessage = ''
+                RequestTimeInUTC = '11/18/2026 08:00:00'; LastProcessTimeInUTC = '11/18/2026 09:00:00'; CompleteTimeInUTC = '11/18/2026 09:05:00'
+                BatchDeleteMode = 'DeleteOlderThanDays'; DeleteOlderThan = '11/18/2025 00:00:00'
+                MajorVersionLimit = '0'; MajorWithMinorVersionsLimit = '0'
+                FilesProcessed = '346'; VersionsProcessed = '7000'; VersionsDeleted = '6740'; VersionsFailed = '0'; StorageReleasedInBytes = '1073741824'
+            }
+        }
+
+        It 'Flattens a status into the documented columns' {
+            $row = ConvertTo-JobStatusRow -SiteUrl 'https://x/sites/A' -Status $script:pnpStatus -ExportedAtUtc '2026-11-18 09:30:00'
+            ($row.PSObject.Properties.Name) | Should -Be @('Url', 'Status', 'BatchDeleteMode', 'RequestTimeInUTC', 'LastProcessTimeInUTC', 'CompleteTimeInUTC', 'DeleteOlderThanInUTC', 'MajorVersionLimit', 'MajorWithMinorVersionsLimit', 'FilesProcessed', 'VersionsProcessed', 'VersionsDeleted', 'VersionsFailed', 'StorageReleasedInBytes', 'ErrorMessage', 'ExportedAtUtc')
+            $row.Url | Should -Be 'https://x/sites/A'
+            $row.Status | Should -Be 'CompleteSuccess'
+            $row.VersionsDeleted | Should -Be '6740'
+            $row.RequestTimeInUTC | Should -Be '2026-11-18 08:00:00'
+            $row.CompleteTimeInUTC | Should -Be '2026-11-18 09:05:00'
+            $row.ExportedAtUtc | Should -Be '2026-11-18 09:30:00'
+        }
+
+        It 'Writes the dates as yyyy-MM-dd HH:mm:ss, reading the service text as MM/dd/yyyy' {
+            $st = [pscustomobject]@{ Status = 'CompleteSuccess'; RequestTimeInUTC = '05/11/2026 09:05:03'; LastProcessTimeInUTC = '5/11/2026 9:05:03'; CompleteTimeInUTC = ''; DeleteOlderThan = '10/19/2026 09:51:36' }
+            $row = ConvertTo-JobStatusRow -SiteUrl 's' -Status $st
+            $row.RequestTimeInUTC | Should -Be '2026-05-11 09:05:03'
+            $row.LastProcessTimeInUTC | Should -Be '2026-05-11 09:05:03'
+            $row.CompleteTimeInUTC | Should -Be ''
+            $row.DeleteOlderThanInUTC | Should -Be '2026-10-19 09:51:36'
+        }
+
+        It 'Writes a DateTime value the same way and keeps any other date text as returned' {
+            $st = [pscustomobject]@{ Status = 'CompleteSuccess'; RequestTimeInUTC = [datetime]::new(2026, 11, 18, 8, 0, 5); CompleteTimeInUTC = '18/11/2026 09:05:00'; LastProcessTimeInUTC = 'n/a'; ErrorMessage = '11/18/2026 09:05:00' }
+            $row = ConvertTo-JobStatusRow -SiteUrl 's' -Status $st
+            $row.RequestTimeInUTC | Should -Be '2026-11-18 08:00:05'
+            $row.CompleteTimeInUTC | Should -Be '18/11/2026 09:05:00'
+            $row.LastProcessTimeInUTC | Should -Be 'n/a'
+            $row.ErrorMessage | Should -Be '11/18/2026 09:05:00'
+        }
+
+        It 'Reads the cut-off date under either spelling (PnP DeleteOlderThan, SPO DeleteOlderThanInUTC)' {
+            (ConvertTo-JobStatusRow -SiteUrl 's' -Status $script:pnpStatus).DeleteOlderThanInUTC | Should -Be '2025-11-18 00:00:00'
+            $spo = [pscustomobject]@{ Status = 'CompleteSuccess'; DeleteOlderThanInUTC = '2025-11-18' }
+            (ConvertTo-JobStatusRow -SiteUrl 's' -Status $spo).DeleteOlderThanInUTC | Should -Be '2025-11-18'
+        }
+
+        It 'Tolerates missing properties and a null status' {
+            $row = ConvertTo-JobStatusRow -SiteUrl 's' -Status ([pscustomobject]@{ Status = 'NoRequestFound' })
+            $row.Status | Should -Be 'NoRequestFound'
+            $row.VersionsDeleted | Should -Be ''
+            (ConvertTo-JobStatusRow -SiteUrl 's' -Status $null).Status | Should -Be 'NoResponse'
+        }
+
+        It 'Totals the sites per status, the versions deleted and the storage released' {
+            $rows = @(
+                (ConvertTo-JobStatusRow -SiteUrl 'a' -Status $script:pnpStatus),
+                (ConvertTo-JobStatusRow -SiteUrl 'b' -Status ([pscustomobject]@{ Status = 'CompleteSuccess'; VersionsDeleted = '60'; StorageReleasedInBytes = '2147483648'; FilesProcessed = '4'; VersionsProcessed = '70' })),
+                (ConvertTo-JobStatusRow -SiteUrl 'c' -Status ([pscustomobject]@{ Status = 'NoRequestFound' })),
+                (ConvertTo-JobStatusRow -SiteUrl 'd' -Status ([pscustomobject]@{ Status = 'CompleteSuccess'; VersionsDeleted = 'n/a'; StorageReleasedInBytes = '' }))
+            )
+            $sum = Get-JobStatusSummary -Rows $rows
+            $sum.Sites | Should -Be 4
+            $sum.ByStatus['CompleteSuccess'] | Should -Be 3
+            $sum.ByStatus['NoRequestFound'] | Should -Be 1
+            @($sum.ByStatus.Keys)[0] | Should -Be 'CompleteSuccess'
+            $sum.VersionsDeleted | Should -Be 6800
+            $sum.FilesProcessed | Should -Be 350
+            $sum.StorageReleasedBytes | Should -Be 3221225472
+            $sum.StorageReleasedGB | Should -Be 3
+        }
+
+        It 'Counts the sites that report no kept job, whatever the spelling of the status' {
+            $rows = @(
+                (ConvertTo-JobStatusRow -SiteUrl 'a' -Status ([pscustomobject]@{ Status = 'NoRequestFound' })),
+                (ConvertTo-JobStatusRow -SiteUrl 'b' -Status ([pscustomobject]@{ Status = 'No request found' })),
+                (ConvertTo-JobStatusRow -SiteUrl 'c' -Status ([pscustomobject]@{ Status = 'CompleteSuccess' }))
+            )
+            (Get-JobStatusSummary -Rows $rows).NoRequestFound | Should -Be 2
+            (Get-JobStatusSummary -Rows @($rows[2])).NoRequestFound | Should -Be 0
+        }
+
+        It 'Summarizes an empty export without failing' {
+            $sum = Get-JobStatusSummary -Rows @()
+            $sum.Sites | Should -Be 0
+            $sum.VersionsDeleted | Should -Be 0
+        }
+
+        It 'Lists the sites that could not be read, once, with the reason' {
+            $rows = New-Object System.Collections.Generic.List[object]
+            $rows.Add((ConvertTo-JobStatusRow -SiteUrl 'https://x/sites/A' -Status $script:pnpStatus))
+            $results = @(
+                [pscustomobject]@{ Site = 'https://x/sites/A'; Outcome = 'Reported'; Detail = 'ok' }
+                [pscustomobject]@{ Site = 'https://x/sites/B'; Outcome = 'NotFound'; Detail = 'Site not found (404)' }
+                [pscustomobject]@{ Site = 'https://x/sites/C'; Outcome = 'AccessDenied'; Detail = 'Access denied' }
+                [pscustomobject]@{ Site = 'https://x/sites/B'; Outcome = 'Failed'; Detail = 'again' }
+            )
+            Add-JobStatusErrorRows -Rows $rows -Results $results -ExportedAtUtc '2026-11-18 09:30:00'
+            $rows.Count | Should -Be 3
+            ($rows | Where-Object Url -eq 'https://x/sites/B').Status | Should -Be 'NotFound'
+            ($rows | Where-Object Url -eq 'https://x/sites/B').ErrorMessage | Should -Be 'Site not found (404)'
+            ($rows | Where-Object Url -eq 'https://x/sites/C').Status | Should -Be 'AccessDenied'
+        }
+
+        It 'Adds the error rows when no site could be read at all (the Rows list is still empty)' {
+            $rows = New-Object System.Collections.Generic.List[object]
+            $results = @(
+                [pscustomobject]@{ Site = 'https://x/sites/B'; Outcome = 'NotFound'; Detail = 'Site not found (404)' }
+                [pscustomobject]@{ Site = 'https://x/sites/C'; Outcome = 'AccessDenied'; Detail = 'Access denied' }
+            )
+            { Add-JobStatusErrorRows -Rows $rows -Results $results -ExportedAtUtc '2026-11-18 09:30:00' } | Should -Not -Throw
+            $rows.Count | Should -Be 2
+            @($rows | ForEach-Object { $_.Status }) | Should -Be @('NotFound', 'AccessDenied')
+            { Add-JobStatusErrorRows -Rows (New-Object System.Collections.Generic.List[object]) -Results @() } | Should -Not -Throw
+        }
+
+        It 'Does not add a row for a site that was read, even if a later step failed' {
+            $rows = New-Object System.Collections.Generic.List[object]
+            $rows.Add((ConvertTo-JobStatusRow -SiteUrl 'https://x/sites/A' -Status $script:pnpStatus))
+            Add-JobStatusErrorRows -Rows $rows -Results @([pscustomobject]@{ Site = 'https://x/sites/A'; Outcome = 'Failed'; Detail = 'x' })
+            $rows.Count | Should -Be 1
+        }
+
+        It 'Writes a UTF-8 BOM CSV that reads back, even when DryRun (WhatIf) is on' {
+            $path = Join-Path $TestDrive 'status.csv'
+            $rows = @((ConvertTo-JobStatusRow -SiteUrl 'https://x/sites/é' -Status $script:pnpStatus), (ConvertTo-JobStatusRow -SiteUrl 'https://x/sites/B' -Status ([pscustomobject]@{ Status = 'NoRequestFound' })))
+            $WhatIfPreference = $true
+            try { Export-JobStatusCsv -Rows $rows -Path $path } finally { $WhatIfPreference = $false }
+            Test-Path $path | Should -BeTrue
+            ([System.IO.File]::ReadAllBytes($path))[0..2] | Should -Be @(0xEF, 0xBB, 0xBF)
+            $back = @(Import-Csv -Path $path -UseCulture)
+            $back.Count | Should -Be 2
+            $back[0].Url | Should -Be 'https://x/sites/é'
+            $back[0].VersionsDeleted | Should -Be '6740'
+            $back[1].Status | Should -Be 'NoRequestFound'
+        }
+    }
+
+    Context 'Report: trim job and job status rows (functional)' {
+
+        BeforeAll {
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            $wanted = 'ConvertTo-SPSHtmlEncoded', 'Export-SPSCleanVersionsReport'
+            foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)) { . ([ScriptBlock]::Create($f.Extent.Text)) }
+            function New-Row($site, $scope, $outcome) { [PSCustomObject]@{ Site = $site; Scope = $scope; Library = ''; Outcome = $outcome; Major = ''; Minor = ''; ExpireAfterDays = ''; Detail = 'd' } }
+        }
+
+        It 'Adds a submitted-jobs card and badge when jobs were submitted' {
+            $rows = @((New-Row 'https://x/sites/A' 'Trim (Age)' 'Submitted'), (New-Row 'https://x/sites/B' 'Trim (Age)' 'Submitted'), (New-Row 'https://x/sites/C' 'Trim (Age)' 'InProgress'))
+            $html = Export-SPSCleanVersionsReport -Results $rows -Version '3.5.0'
+            $html | Should -Match 'Trim jobs submitted'
+            $html | Should -Match 'Trim job already running'
+            $html | Should -Match 'badge Submitted'
+            $html | Should -Match 'badge InProgress'
+            $html | Should -Match '>Trim \(Age\)<'
+        }
+
+        It 'Uses a would-submit card in DryRun mode' {
+            $html = Export-SPSCleanVersionsReport -Results @((New-Row 'https://x/sites/A' 'Trim (Count)' 'WouldSubmit')) -Version '3.5.0' -DryRunMode:$true
+            $html | Should -Match 'Trim jobs \(would submit\)'
+            $html | Should -Match 'badge WouldSubmit'
+        }
+
+        It 'Adds a job status card for -ExportJobStatus rows' {
+            $html = Export-SPSCleanVersionsReport -Results @((New-Row 'https://x/sites/A' 'JobStatus' 'Reported')) -Version '3.5.0'
+            $html | Should -Match 'Job status read'
+            $html | Should -Match 'badge Reported'
+        }
+
+        It 'Keeps the previous layout (no extra card) when a run has no trim or status rows' {
+            $html = Export-SPSCleanVersionsReport -Results @((New-Row 'https://x/sites/A' 'Legacy' 'Applied')) -Version '3.5.0'
+            $html | Should -Not -Match 'Trim jobs'
+            $html | Should -Not -Match 'Job status read'
+        }
+
+        It 'A failed trim job still marks the report ATTENTION' {
+            $html = Export-SPSCleanVersionsReport -Results @((New-Row 'https://x/sites/A' 'Trim (Age)' 'Failed')) -Version '3.5.0'
+            $html | Should -Match 'ATTENTION'
         }
     }
 

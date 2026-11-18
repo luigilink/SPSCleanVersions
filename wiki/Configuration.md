@@ -18,6 +18,8 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
   "KeepMinorVersions": <integer>,
   "ClientId": "<string>",
   "ForceDeleteOldVersions": <boolean>,
+  "TrimJobMode": "<string>",
+  "TrimOnly": <boolean>,
   "DryRun": <boolean>,
   "VersionPolicyMode": "<string>",
   "ExpireVersionsAfterDays": <integer>,
@@ -41,11 +43,13 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 | `KeepMinorVersions` | integer | No | `0` | Maximum number of minor versions to retain. Set to `0` to disable minor versioning. Maps to `-MajorWithMinorVersions` in the site version policy modes. |
 | `ClientId` | string | No | — | Azure AD App Registration Client ID used for authentication. Required for Interactive login (local) and optional for Managed Identity (Azure Automation). |
 | `ForceDeleteOldVersions` | boolean | No | `false` | When `true`, submits a **file version trim job** on each site (`New-PnPSiteFileVersionBatchDeleteJob`) so that **existing** versions are cleaned: a version policy only governs versions created afterwards. The job matches `VersionPolicyMode`: `ExpireAfter` trims **by age** (`ExpireVersionsAfterDays`), `AutoExpiration` uses the **automatic** algorithm, `Legacy` / `NoExpiration` / `InheritFromTenant` trim **by count** (`KeepMajorVersions` / `KeepMinorVersions`). See [Trimming existing versions](#trimming-existing-versions-forcedeleteoldversions). Deleted versions are **permanently deleted**. **Requires delegated user context** — automatically skipped in Azure Automation. |
+| `TrimJobMode` | string | No | `Auto` | Which trim job `ForceDeleteOldVersions` submits: `Auto` (follows `VersionPolicyMode`), `Age`, `Count` or `Automatic`. A job applies one criterion and a site accepts one job at a time, so forcing the job lets a run do **one pass per criterion**. Ignored (with a warning) when `ForceDeleteOldVersions` is `false`. See [Choosing the trim job](#choosing-the-trim-job-trimjobmode). |
+| `TrimOnly` | boolean | No | `false` | When `true` (with `ForceDeleteOldVersions: true`), the script **only submits the trim job** on each site: the site version policy is not read or changed and no library is listed. Delegated runs only. See [Submitting trim jobs only](#submitting-trim-jobs-only-trimonly). |
 | `DryRun` | boolean | No | `false` | When `true`, simulates all changes without applying them. Use this instead of `-WhatIf` when running as an Azure Automation Runbook. |
 | `VersionPolicyMode` | string | No | `Legacy` | Version policy mechanism. `Legacy` keeps the per-library count-based `Set-PnPList` behaviour. `AutoExpiration`, `ExpireAfter`, `NoExpiration` and `InheritFromTenant` apply a site-level policy via `Set-PnPSiteVersionPolicy`. See [Version policy modes](#version-policy-modes). |
 | `ExpireVersionsAfterDays` | integer | No | `0` | Number of days after which versions expire. Used by `ExpireAfter` (must be **>= 30**). `NoExpiration` forces `0`. |
 | `ApplyTo` | string | No | `Both` | `New`, `Existing` or `Both` document libraries. Maps to `-ApplyToNewDocumentLibraries` / `-ApplyToExistingDocumentLibraries`. Site version policy modes only. |
-| `SiteScope` | string | No | `Selected` | `Selected` processes `SiteUrls`. `All` enumerates **every** site collection in the tenant via `Get-PnPTenantSite`. Site version policy modes only (not `Legacy`). See [Tenant-wide scope](#tenant-wide-scope-sitescope-all). |
+| `SiteScope` | string | No | `Selected` | `Selected` processes `SiteUrls`. `All` enumerates **every** site collection in the tenant via `Get-PnPTenantSite`. Site version policy modes only (not `Legacy`, unless `TrimOnly` or `-ExportJobStatus` is used, as they do not use the policy). See [Tenant-wide scope](#tenant-wide-scope-sitescope-all). |
 | `TenantAdminUrl` | string | Conditional | — | SharePoint admin center URL (e.g. `https://contoso-admin.sharepoint.com`). **Required** when `SiteScope` is `All`. |
 | `SiteFilter` | string | No | — | Optional server-side `-Filter` passed to `Get-PnPTenantSite` to narrow the enumeration when `SiteScope` is `All` (e.g. `"Url -like 'sales'"`). |
 | `EnableReport` | boolean | No | `true` | Write a local HTML report of the run to `Results/` (plus a machine-readable `SPSCleanVersions-<timestamp>.json` next to it). The report has **Site / Scope / Library / Outcome / Major / Minor / ExpireAfterDays / Detail** columns; Legacy mode reports one row per document library. **Local execution only** — no report is produced when running in Azure Automation. |
@@ -88,13 +92,70 @@ The run log and the `DryRun` message tell which kind of job is submitted (`Age`,
 
 > **Permanent deletion:** versions deleted by a trim job bypass the recycle bin and cannot be recovered. Start with a test site, and use the version usage report (`New-SPOSiteFileVersionExpirationReportJob`) to estimate the impact first.
 
-> **Asynchronous, one job per site:** a trim job runs in the background (off-peak hours) and can take hours or days. A site accepts one trim job at a time: while a previous job is still running, a new request is skipped with an *already in progress* message. Track a job with `Get-SPOSiteFileVersionBatchDeleteJobProgress` (SharePoint Online Management Shell) or `Get-PnPSiteFileVersionBatchDeleteJobStatus` (connected to the site): the `BatchDeleteMode` and `DeleteOlderThanInUTC` fields tell which criterion was used.
+> **Asynchronous, one job per site:** a trim job runs in the background (off-peak hours) and can take hours or days. A site accepts one trim job at a time: while a previous job is still running, a new request is skipped with an *already in progress* message. Track a job with `Get-SPOSiteFileVersionBatchDeleteJobProgress` (SharePoint Online Management Shell) or `Get-PnPSiteFileVersionBatchDeleteJobStatus` (connected to the site): the `BatchDeleteMode` and `DeleteOlderThanInUTC` fields tell which criterion was used. To follow many sites at once, use the [`-ExportJobStatus`](#tracking-trim-jobs-exportjobstatus) switch of the script.
 
 > **Age-based rules need a final pass:** with `ExpireAfter`, versions created before the policy was applied but newer than `ExpireVersionsAfterDays` at the time of the trim never receive an expiration date, so they are only removed by a later trim. Run the trim again about `ExpireVersionsAfterDays` days after the policy was activated. The `Automatic` and count-based jobs do not have this limitation.
 
-> **Count limit with `ExpireAfter`:** the age-based job does not enforce the count limit of the policy; SharePoint trims it progressively as files are edited. For an immediate count-based trim, run `New-PnPSiteFileVersionBatchDeleteJob -MajorVersionLimit <n> -MajorWithMinorVersionsLimit <n>` manually once the age-based job has finished.
+> **Count limit with `ExpireAfter`:** the age-based job does not enforce the count limit of the policy; SharePoint trims it progressively as files are edited. For an immediate count-based trim, run a second pass with `TrimJobMode: Count` (see [Choosing the trim job](#choosing-the-trim-job-trimjobmode)) once the age-based job has finished.
 
 > **What a trim does not touch:** versions under a retention policy or an eDiscovery hold receive an expiration date instead of being deleted. Learn lists read-only, locked and archived sites as excluded from tenant-level trimming; plan to unlock a locked site before expecting its versions to be trimmed.
+
+### Choosing the trim job (TrimJobMode)
+
+By default (`Auto`) the job follows `VersionPolicyMode`, as in the table above. Set `TrimJobMode` to force one job whatever the policy mode:
+
+| `TrimJobMode` | Job submitted | Settings used |
+|---|---|---|
+| `Auto` (default) | The job that matches `VersionPolicyMode` | — |
+| `Age` | `New-PnPSiteFileVersionBatchDeleteJob -DeleteBeforeDays <n>` | `ExpireVersionsAfterDays` (>= 30) |
+| `Count` | `New-PnPSiteFileVersionBatchDeleteJob -MajorVersionLimit <n> -MajorWithMinorVersionsLimit <n>` | `KeepMajorVersions`, `KeepMinorVersions` |
+| `Automatic` | `New-PnPSiteFileVersionBatchDeleteJob -Automatic` | — |
+
+`TrimJobMode` only applies with `ForceDeleteOldVersions: true`; otherwise it is ignored with a warning.
+
+> **One criterion per job, so two passes.** A job cannot combine an age limit and a count limit (the cmdlet uses separate parameter sets and refuses the combination), and a site accepts one job at a time. To apply both, submit one job, wait until it has finished (see [Tracking trim jobs](#tracking-trim-jobs-exportjobstatus)), then submit the other with a second run.
+
+> **No cut-off before January 1, 2023.** Microsoft Learn documents that the age-based job always deletes every version created before January 1, 2023. The script therefore refuses an `ExpireVersionsAfterDays` whose cut-off date falls before that day and tells you the largest value it accepts, rather than deleting more than the configured value suggests. The check runs once, before the sign-in, for local runs; in Azure Automation, where the trim job is never submitted, it is not applied, so a runbook that applies a version policy is not stopped by the window of a job it skips.
+
+### Submitting trim jobs only (TrimOnly)
+
+With `ForceDeleteOldVersions: true` and `TrimOnly: true`, the script submits the trim job on each site and **nothing else**: the site version policy is not read or changed, and no library is listed. Use it when the policy is already in place and only the existing versions remain to be cleaned, or to run the second pass of a trim that uses two criteria.
+
+- It needs `ForceDeleteOldVersions: true` and a **delegated** (local) run: the script stops before signing in otherwise.
+- `SiteScope: All` is accepted with the default `VersionPolicyMode: Legacy`, because the policy mode is not used. Combine it with `AddSiteCollectionAdmin` for a large batch, as for any delegated run.
+- The job is chosen with `TrimJobMode` (with `Auto`, it follows `VersionPolicyMode`).
+- The policy settings (`VersionPolicyMode`, `ExpireVersionsAfterDays`, `ApplyTo`) are not validated for a policy, since none is applied: `ExpireVersionsAfterDays` is only checked (30 days minimum, January 1, 2023 limit) when the job is age-based, and `KeepMajorVersions` / `KeepMinorVersions` are only used by a count-based job. The same applies to `-ExportJobStatus`, which uses none of them.
+- Each site gets a result row with the scope `Trim (Age)`, `Trim (Count)` or `Trim (Automatic)` and the outcome `Submitted`, `WouldSubmit` (`DryRun`), `InProgress` (a previous job is still running on the site: run it again later) or `Failed`.
+
+```json
+{
+  "SiteUrls": [
+    "https://contoso.sharepoint.com/sites/News",
+    "https://contoso.sharepoint.com/sites/HR"
+  ],
+  "ClientId": "00000000-0000-0000-0000-000000000000",
+  "ForceDeleteOldVersions": true,
+  "TrimOnly": true,
+  "TrimJobMode": "Age",
+  "ExpireVersionsAfterDays": 365,
+  "DryRun": true
+}
+```
+
+### Tracking trim jobs (ExportJobStatus)
+
+A trim job is asynchronous, and SharePoint does not keep the state of a completed job indefinitely (the retention is not documented; plan for about a month). The `-ExportJobStatus` switch reads the trim job state of every site of the configuration and writes it to a CSV, so you can follow a batch and keep the figures (versions deleted, storage released).
+
+```powershell
+.\SPSCleanVersions.ps1 -ConfigFile '.\sites.json' -ExportJobStatus
+```
+
+- **Read-only.** No version policy is read or changed and no job is submitted, whatever `DryRun`, `ForceDeleteOldVersions`, `TrimOnly` or `TrimJobMode` say, so the configuration file of the run that submitted the jobs can be reused as is.
+- **Local (delegated) runs only**, with the same sign-in rules as a normal run: the account must be a site collection administrator on each site, or `AddSiteCollectionAdmin` must be on. `SiteScope: All` works too.
+- **Output:** `Results/SPSCleanVersions-JobStatus-<timestamp>.csv` (UTF-8 with BOM and the list separator of the current culture, so it opens straight in Excel), next to the usual log, report and JSON. There is one row per site, including the sites that could not be read (`AccessDenied`, `NotFound`, `Failed`), so a missing site is visible.
+- **Columns:** `Url`, `Status`, `BatchDeleteMode`, `RequestTimeInUTC`, `LastProcessTimeInUTC`, `CompleteTimeInUTC`, `DeleteOlderThanInUTC`, `MajorVersionLimit`, `MajorWithMinorVersionsLimit`, `FilesProcessed`, `VersionsProcessed`, `VersionsDeleted`, `VersionsFailed`, `StorageReleasedInBytes`, `ErrorMessage`, `ExportedAtUtc`.
+- **Values:** `Status` is the value returned by SharePoint, for example `New` (the job is queued), `CompleteSuccess` (it has finished) or `NoRequestFound` (no job is kept for the site). The four date columns are written as `yyyy-MM-dd HH:mm:ss` (UTC): SharePoint returns them as `MM/dd/yyyy` text, which a spreadsheet would read in the local order. `DeleteOlderThanInUTC` is empty for a count-based job, and the two limit columns are empty for an age-based one.
+- **Summary:** a `--- SPSCleanVersions job status: N site(s) — … — X version(s) deleted, Y GB released ---` line gives the number of sites per status and the totals. A warning counts the sites that report `NoRequestFound` (*No request found* in the SharePoint Online Management Shell): SharePoint keeps no job for them, either because none was submitted or because its state has expired.
 
 See Microsoft Learn: [Set version limits for a document library](https://learn.microsoft.com/sharepoint/library-version-limits) and [Trim existing versions](https://learn.microsoft.com/sharepoint/trim-versions).
 
@@ -189,7 +250,7 @@ count triggers a warning telling you to run `-CleanupAdminsOnly`.
 
 By default (`SiteScope: Selected`) the script only processes the sites listed in `SiteUrls`. Set `SiteScope: All` to apply a site version policy across **every site collection in the tenant**. The script connects to `TenantAdminUrl`, enumerates sites with `Get-PnPTenantSite` (OneDrive personal sites excluded), optionally narrowed by `SiteFilter`, and applies the policy to each — still gated by the per-site drift check, so unchanged sites are skipped.
 
-> **⚠️ Tenant-wide impact:** `SiteScope: All` can touch **thousands** of site collections and, when `ApplyTo` includes `Existing`, submit a background version-trim job on each. **Always run with `"DryRun": true` first** to review the scope, and consider narrowing with `SiteFilter`. This scope is only supported with the site version policy modes (not `Legacy`), and requires **SharePoint Administrator** privileges plus a delegated (interactive/local) context.
+> **⚠️ Tenant-wide impact:** `SiteScope: All` can touch **thousands** of site collections and, when `ApplyTo` includes `Existing`, submit a background version-trim job on each. **Always run with `"DryRun": true` first** to review the scope, and consider narrowing with `SiteFilter`. This scope is only supported with the site version policy modes (not `Legacy`, unless `TrimOnly` or `-ExportJobStatus` is used, as they do not use the policy), and requires **SharePoint Administrator** privileges plus a delegated (interactive/local) context.
 
 ```json
 {
@@ -210,6 +271,8 @@ Every run produces a summary of what happened per site (**Applied** / **WouldApp
 
 - **Local execution:** a transcript is written to a `Logs/` folder and a self-contained HTML report (summary cards + a filterable table) to a `Results/` folder, both next to the script. A machine-readable JSON (`SPSCleanVersions-<timestamp>.json`) is written alongside the HTML. Files older than `LogRetentionDays` (default 180) are pruned automatically. Set `"EnableReport": false` to skip the HTML report.
 - **Azure Automation:** there is no persistent filesystem, so the **HTML report is not produced**. The per-site actions are visible in the job output (`Write-Output`/`Write-Warning`) and the run ends with a summary line (`--- SPSCleanVersions finished: ... ---`).
+
+With `ForceDeleteOldVersions`, each trim job submission is a result row too (scope `Trim (Age)`, `Trim (Count)` or `Trim (Automatic)`; outcome `Submitted`, `WouldSubmit`, `InProgress` or `Failed`), the report shows matching cards, and the run adds a `--- SPSCleanVersions trim jobs: N submitted, M would submit, K already in progress ---` line after the `finished` line. A `-ExportJobStatus` run writes its own CSV, `SPSCleanVersions-JobStatus-<timestamp>.csv`, to `Results/` (pruned by `LogRetentionDays` like the other files).
 
 The report values are HTML-encoded, and a `DryRun` badge is shown when the run is a simulation. Rows with the `Failed` or `AccessDenied` outcome are highlighted so problem sites stand out.
 
@@ -363,6 +426,37 @@ With `ExpireAfter`, the same switch submits an **age-based** job, so versions ol
   "ForceDeleteOldVersions": true
 }
 ```
+
+### Trim jobs only, then follow them (local only)
+
+Submits the age-based trim job on each site without touching the version policy, then, once the jobs have had time to run, exports their state. The policy of the libraries is assumed to be in place already.
+
+```json
+{
+  "SiteUrls": [
+    "https://contoso.sharepoint.com/sites/News",
+    "https://contoso.sharepoint.com/sites/HR"
+  ],
+  "ClientId": "00000000-0000-0000-0000-000000000000",
+  "ForceDeleteOldVersions": true,
+  "TrimOnly": true,
+  "TrimJobMode": "Age",
+  "ExpireVersionsAfterDays": 365
+}
+```
+
+```powershell
+# 1. Check what would be submitted (add "DryRun": true to the JSON, or use -WhatIf)
+.\SPSCleanVersions.ps1 -ConfigFile '.\Config\trim-age.json' -WhatIf
+
+# 2. Submit the jobs
+.\SPSCleanVersions.ps1 -ConfigFile '.\Config\trim-age.json'
+
+# 3. Later: export the state of the jobs of the same sites to a CSV
+.\SPSCleanVersions.ps1 -ConfigFile '.\Config\trim-age.json' -ExportJobStatus
+```
+
+A second pass with `"TrimJobMode": "Count"` (and `KeepMajorVersions` / `KeepMinorVersions`) applies the count limit once the first jobs have finished. See [Trimming existing versions](#trimming-existing-versions-forcedeleteoldversions).
 
 ### Full configuration with Client ID
 

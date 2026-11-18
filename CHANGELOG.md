@@ -5,6 +5,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-11-18
+
+### Added
+
+- SPSCleanVersions.ps1
+  - **`TrimJobMode` setting** (`Auto` | `Age` | `Count` | `Automatic`, default `Auto`) chooses which trim job
+    `ForceDeleteOldVersions` submits. `Auto` follows `VersionPolicyMode` (age for `ExpireAfter`, automatic for
+    `AutoExpiration`, count otherwise); the other values force that job whatever the policy mode, so a run can
+    do one pass per criterion: a job cannot combine an age limit and a count limit, and a site accepts one job
+    at a time.
+  - **`TrimOnly` setting.** With `ForceDeleteOldVersions`, only the trim job is submitted: the site version
+    policy is not read or changed and no library is listed. `SiteScope: All` is accepted with `Legacy` in
+    this mode, and the policy settings (such as an `ExpireVersionsAfterDays` left at `0`) no longer stop a
+    count-based trim or a status export. It needs a delegated run, which is checked before the sign-in.
+  - **`-ExportJobStatus` switch.** Read-only: reads the trim job state of each site
+    (`Get-PnPSiteFileVersionBatchDeleteJobStatus`) and writes
+    `Results/SPSCleanVersions-JobStatus-<timestamp>.csv` (status, times as `yyyy-MM-dd HH:mm:ss` UTC, versions
+    deleted, storage released, error), one row per site including the sites that could not be read, then a
+    `--- SPSCleanVersions job status: … ---` summary line and a warning for the sites that report
+    `NoRequestFound`. Local (delegated) runs only: the status cannot be read with an app-only identity.
+  - **Trim job submissions are results of the run.** Each submission is now a row of the report and of the
+    JSON (scope `Trim (Age)`, `Trim (Count)` or `Trim (Automatic)`; outcome `Submitted`, `WouldSubmit`,
+    `InProgress` or `Failed`), with matching report cards and a
+    `--- SPSCleanVersions trim jobs: … ---` line after the unchanged
+    `--- SPSCleanVersions finished: … ---` line.
+  - Config/SPSCleanVersions.trim-only.example.json: example configuration for a trim-only run.
+
+### Changed
+
+- SPSCleanVersions.ps1
+  - **The age-based trim job is refused when its cut-off falls before January 1, 2023.** That job always
+    deletes every version created before that date (Microsoft Learn, *Trim versions*), so an
+    `ExpireVersionsAfterDays` that reaches further back would delete more than configured. The run stops
+    before the sign-in and tells the largest value accepted. Under Azure Automation, where the trim job is
+    never submitted, the check is not applied: a runbook keeps applying its version policy.
+  - With `ForceDeleteOldVersions`, the result row count and the `Failed` count of a run can be higher than
+    before: trim job submissions are now recorded as rows, and a failed submission counts as `Failed`.
+
 ### Fixed
 
 - SPSCleanVersions.ps1
@@ -20,9 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
-- Wiki (Configuration, Usage, Home) and script help: new *Trimming existing versions* section explaining that
-  a policy only applies to new versions, which trim job each mode submits, how to track it, and that an
-  age-based rule needs a final pass about `ExpireVersionsAfterDays` days after the policy was activated.
+- Wiki (Configuration, Usage, Home, Getting Started) and script help: new *Trimming existing versions*
+  section explaining that a policy only applies to new versions, which trim job each mode submits, how to
+  choose it (`TrimJobMode`), `TrimOnly` and `-ExportJobStatus`, the two-pass trim (one criterion per job), the
+  January 1, 2023 limit, the new report rows, and that an age-based rule needs a final pass about
+  `ExpireVersionsAfterDays` days after the policy was activated.
 
 ## [3.4.0] - 2026-09-30
 
