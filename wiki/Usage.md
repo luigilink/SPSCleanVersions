@@ -44,7 +44,7 @@ Configuration is provided as JSON, from one of two **mutually exclusive** parame
 | `KeepMajorVersions` | integer | No | `50` | Major versions to keep (maps to `-MajorVersions` in the site policy modes). |
 | `KeepMinorVersions` | integer | No | `0` | Minor versions to keep (maps to `-MajorWithMinorVersions`). |
 | `ClientId` | string | No | — | Azure AD App Registration / Managed Identity Client ID. |
-| `ForceDeleteOldVersions` | boolean | No | `false` | Trigger a batch delete of old file versions (delegated context; skipped app-only). |
+| `ForceDeleteOldVersions` | boolean | No | `false` | Submit a file version trim job on each site so existing versions are cleaned; the job follows `VersionPolicyMode` (age for `ExpireAfter`, automatic for `AutoExpiration`, count otherwise). Delegated context; skipped app-only. |
 | `DryRun` | boolean | No | `false` | Simulate changes without applying them (runbook-friendly `-WhatIf`). |
 | `VersionPolicyMode` | string | No | `Legacy` | `Legacy` (per-library `Set-PnPList`), or `AutoExpiration` / `ExpireAfter` / `NoExpiration` / `InheritFromTenant` (site-level `Set-PnPSiteVersionPolicy`). |
 | `ExpireVersionsAfterDays` | integer | No | `0` | Expiration window for `ExpireAfter` (must be `0` or `>= 30`). |
@@ -81,12 +81,20 @@ See the [Configuration](./Configuration) page for the full reference and more ex
 
 ### Example 4: Force Deletion of Old File Version History
 
-Set `"ForceDeleteOldVersions": true` to submit a batch delete job that removes old file versions exceeding the configured limits via `New-PnPSiteFileVersionBatchDeleteJob`.
+Set `"ForceDeleteOldVersions": true` to submit a file version trim job on each site, via `New-PnPSiteFileVersionBatchDeleteJob`, so that **existing** versions are cleaned (a version policy only governs versions created afterwards). The job matches `VersionPolicyMode`: `ExpireAfter` deletes versions older than `ExpireVersionsAfterDays`, `AutoExpiration` runs the automatic algorithm, and `Legacy` / `NoExpiration` / `InheritFromTenant` delete the versions beyond `KeepMajorVersions` / `KeepMinorVersions`. See [Configuration](./Configuration#trimming-existing-versions-forcedeleteoldversions) for details.
 
-> **Note:** Batch delete requires **delegated user context**. It is automatically skipped when running in Azure Automation (Managed Identity / app-only). A warning is displayed in that case.
+> **Note:** Trim jobs require **delegated user context**. They are automatically skipped when running in Azure Automation (Managed Identity / app-only). A warning is displayed in that case.
+
+> **Warning:** versions deleted by a trim job are permanently deleted (no recycle bin). Run with `"DryRun": true` first.
 
 ```powershell
 .\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/News"],"KeepMajorVersions":50,"ForceDeleteOldVersions":true,"DryRun":true}'
+```
+
+To trim by age with an expiration policy (versions older than 365 days are deleted, up to 100 major versions are kept):
+
+```powershell
+.\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/News"],"VersionPolicyMode":"ExpireAfter","ExpireVersionsAfterDays":365,"KeepMajorVersions":100,"ForceDeleteOldVersions":true,"DryRun":true}'
 ```
 
 ### Example 5: Apply a site version policy with expiration

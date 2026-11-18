@@ -1,5 +1,18 @@
 # SPSCleanVersions - Release Notes
 
+## [Unreleased]
+
+### Fixed
+
+- SPSCleanVersions.ps1
+  - **`ForceDeleteOldVersions` trims existing versions according to the version policy mode.** It used to
+    always submit a count-limit trim job, so with `ExpireAfter` the versions older than
+    `ExpireVersionsAfterDays` were never removed (a policy only governs versions created afterwards).
+    It now submits an **age-based** job for `ExpireAfter` and the **automatic** job for `AutoExpiration`;
+    `Legacy`, `NoExpiration` and `InheritFromTenant` keep the count-limit job. The run log and the
+    `DryRun` message tell which kind of job is submitted. See the new *Trimming existing versions*
+    section of the wiki (permanent deletion, asynchronous jobs, final pass for age-based rules).
+
 ## [3.4.0] - 2026-09-30
 
 ### Added

@@ -342,6 +342,112 @@ Describe 'SPSCleanVersions Script' {
         It 'Should warn when batch delete is skipped due to app-only auth' {
             $scriptContent | Should -Match 'NOT supported with app-only authentication'
         }
+
+        It 'Should pick the trim job from the version policy mode (Get-VersionTrimJobPlan)' {
+            $scriptContent | Should -Match 'Get-VersionTrimJobPlan\s+-Mode\s+\$VersionPolicyMode'
+        }
+
+        It 'Should splat the trim plan parameters instead of hard-coding the count limits' {
+            $scriptContent | Should -Match '\$batchParams\s*=\s*\$trimPlan\.Parameters'
+            $scriptContent | Should -Not -Match '\$batchParams\s*=\s*@\{'
+        }
+
+        It 'Should log the kind of trim job that is submitted' {
+            $scriptContent | Should -Match 'Starting \$\(\$trimPlan\.Kind\) trim job'
+        }
+    }
+
+    Context 'Get-VersionTrimJobPlan (functional)' {
+
+        BeforeAll {
+            # Extract and dot-source the REAL Get-VersionTrimJobPlan from the script AST. Regression
+            # for #62: ForceDeleteOldVersions always submitted a count-limit trim job, so ExpireAfter
+            # never trimmed existing versions by age (a policy only governs versions created later).
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-VersionTrimJobPlan' }, $true) | Select-Object -First 1
+            . ([ScriptBlock]::Create($fn.Extent.Text))
+
+            # Local stub mirroring the three mutually exclusive parameter sets of the real cmdlet
+            # (without importing PnP.PowerShell): binding a plan that mixes criteria would fail, and
+            # the bound parameter set tells which criterion the job would use.
+            function New-PnPSiteFileVersionBatchDeleteJob {
+                [CmdletBinding(DefaultParameterSetName = 'CountLimits')]
+                param(
+                    [Parameter(ParameterSetName = 'AutomaticTrim', Mandatory = $true)] [switch] $Automatic,
+                    [Parameter(ParameterSetName = 'DeleteOlderThanDays', Mandatory = $true)] [int] $DeleteBeforeDays,
+                    [Parameter(ParameterSetName = 'CountLimits', Mandatory = $true)] [int] $MajorVersionLimit,
+                    [Parameter(ParameterSetName = 'CountLimits', Mandatory = $true)] [int] $MajorWithMinorVersionsLimit,
+                    [switch] $Force
+                )
+                $PSCmdlet.ParameterSetName
+            }
+        }
+
+        It 'ExpireAfter submits an age-based job (DeleteBeforeDays = ExpireAfterDays)' {
+            $plan = Get-VersionTrimJobPlan -Mode 'ExpireAfter' -MajorVersions 100 -MajorWithMinorVersions 0 -ExpireAfterDays 365
+            $plan.Kind | Should -Be 'Age'
+            $plan.Parameters.Keys | Should -Be @('DeleteBeforeDays')
+            $plan.Parameters.DeleteBeforeDays | Should -Be 365
+            $plan.Description | Should -Match '365 days'
+        }
+
+        It 'ExpireAfter does not carry the count limits (one criterion per job)' {
+            $plan = Get-VersionTrimJobPlan -Mode 'ExpireAfter' -MajorVersions 100 -MajorWithMinorVersions 5 -ExpireAfterDays 180
+            $plan.Parameters.ContainsKey('MajorVersionLimit') | Should -BeFalse
+            $plan.Parameters.ContainsKey('MajorWithMinorVersionsLimit') | Should -BeFalse
+        }
+
+        It 'ExpireAfter below 30 days is rejected (the age-based job cannot trim the last 30 days)' {
+            { Get-VersionTrimJobPlan -Mode 'ExpireAfter' -ExpireAfterDays 29 } | Should -Throw '*greater than or equal to 30*'
+            { Get-VersionTrimJobPlan -Mode 'ExpireAfter' -ExpireAfterDays 0 } | Should -Throw '*greater than or equal to 30*'
+        }
+
+        It 'ExpireAfter accepts the 30-day minimum' {
+            (Get-VersionTrimJobPlan -Mode 'ExpireAfter' -ExpireAfterDays 30).Parameters.DeleteBeforeDays | Should -Be 30
+        }
+
+        It 'AutoExpiration submits the automatic algorithm job' {
+            $plan = Get-VersionTrimJobPlan -Mode 'AutoExpiration' -MajorVersions 50 -MajorWithMinorVersions 0 -ExpireAfterDays 0
+            $plan.Kind | Should -Be 'Automatic'
+            $plan.Parameters.Keys | Should -Be @('Automatic')
+            $plan.Parameters.Automatic | Should -BeTrue
+        }
+
+        It '<Mode> keeps the count-limit job (KeepMajorVersions / KeepMinorVersions)' -ForEach @(
+            @{ Mode = 'Legacy' }
+            @{ Mode = 'NoExpiration' }
+            @{ Mode = 'InheritFromTenant' }
+        ) {
+            $plan = Get-VersionTrimJobPlan -Mode $Mode -MajorVersions 100 -MajorWithMinorVersions 5 -ExpireAfterDays 0
+            $plan.Kind | Should -Be 'Count'
+            $plan.Parameters.MajorVersionLimit | Should -Be 100
+            $plan.Parameters.MajorWithMinorVersionsLimit | Should -Be 5
+            $plan.Parameters.ContainsKey('DeleteBeforeDays') | Should -BeFalse
+            $plan.Parameters.ContainsKey('Automatic') | Should -BeFalse
+        }
+
+        It 'Count job binds MajorWithMinorVersionsLimit = 0 (the cmdlet requires both limits)' {
+            $plan = Get-VersionTrimJobPlan -Mode 'Legacy' -MajorVersions 100 -MajorWithMinorVersions 0
+            $plan.Parameters.ContainsKey('MajorWithMinorVersionsLimit') | Should -BeTrue
+            $plan.Parameters.MajorWithMinorVersionsLimit | Should -Be 0
+        }
+
+        It '<Mode> plan binds to the matching cmdlet parameter set (<Set>)' -ForEach @(
+            @{ Mode = 'ExpireAfter'; Set = 'DeleteOlderThanDays' }
+            @{ Mode = 'AutoExpiration'; Set = 'AutomaticTrim' }
+            @{ Mode = 'Legacy'; Set = 'CountLimits' }
+            @{ Mode = 'NoExpiration'; Set = 'CountLimits' }
+            @{ Mode = 'InheritFromTenant'; Set = 'CountLimits' }
+        ) {
+            $plan = Get-VersionTrimJobPlan -Mode $Mode -MajorVersions 100 -MajorWithMinorVersions 0 -ExpireAfterDays 365
+            $batchParams = $plan.Parameters
+            (New-PnPSiteFileVersionBatchDeleteJob @batchParams -Force) | Should -Be $Set
+        }
+
+        It 'Rejects an unknown mode' {
+            { Get-VersionTrimJobPlan -Mode 'Nope' } | Should -Throw
+        }
     }
 
     Context 'Local single sign-in (one prompt, per-site interactive)' {
