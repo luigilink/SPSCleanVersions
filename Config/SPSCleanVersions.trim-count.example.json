@@ -1,0 +1,17 @@
+{
+  "SiteUrls": [
+    "https://contoso.sharepoint.com/sites/News",
+    "https://contoso.sharepoint.com/sites/HR"
+  ],
+  "ClientId": "00000000-0000-0000-0000-000000000000",
+  "TenantAdminUrl": "https://contoso-admin.sharepoint.com",
+  "AddSiteCollectionAdmin": true,
+  "ForceDeleteOldVersions": true,
+  "TrimOnly": true,
+  "TrimJobMode": "Count",
+  "KeepMajorVersions": 100,
+  "KeepMinorVersions": 0,
+  "DryRun": true,
+  "EnableReport": true,
+  "LogRetentionDays": 180
+}

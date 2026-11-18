@@ -19,5 +19,6 @@
 - 📖 [Documentation (Wiki)](https://github.com/luigilink/SPSCleanVersions/wiki)
 - 🚀 [Getting Started](https://github.com/luigilink/SPSCleanVersions/wiki/Getting-Started)
 - ⚙️ [Configuration reference](https://github.com/luigilink/SPSCleanVersions/wiki/Configuration)
+- 🧩 [Example configuration files](https://github.com/luigilink/SPSCleanVersions/wiki/Configuration#example-files)
 - 📝 [Changelog](CHANGELOG.md)
 - 🤝 [Contributing](.github/CONTRIBUTING.md)

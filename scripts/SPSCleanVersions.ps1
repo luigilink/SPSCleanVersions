@@ -107,7 +107,12 @@
     Path to a local JSON file containing the same configuration schema as -InputJson.
     Ideal for local execution and testing. The file is read and parsed with
     ConvertFrom-Json. Mutually exclusive with -InputJson. See
-    Config/SPSCleanVersions.example.json for a template.
+    Config/SPSCleanVersions.example.json for a template listing every property, and
+    Config/SPSCleanVersions.<scenario>.example.json for ready-to-copy examples
+    (legacy-count, auto-expiration, expire-after, tenant-wide, jit-admin, trim-only,
+    trim-count, azure-automation). The release archive and the PowerShell Gallery
+    package contain the script only: the example files, and what each one is for, are
+    listed at https://github.com/luigilink/SPSCleanVersions/wiki/Configuration#example-files
 
     .PARAMETER CleanupAdminsOnly
     Cleanup mode for the AddSiteCollectionAdmin feature. Revokes any site collection admin grants

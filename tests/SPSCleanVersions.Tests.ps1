@@ -2115,4 +2115,117 @@ Describe 'SPSCleanVersions Script' {
             @($plainTop | Where-Object { $known.Contains($_) }) | Should -BeNullOrEmpty
         }
     }
+
+    Context 'Example configuration files (Config/*.example.json)' {
+
+        BeforeAll {
+            $script:examples = @(Get-ChildItem -Path (Join-Path $PSScriptRoot '..' 'Config') -Filter '*.example.json' | Sort-Object Name)
+            $script:wikiConfig = Get-Content -Path (Join-Path $PSScriptRoot '..' 'wiki' 'Configuration.md') -Raw
+            $script:readme = Get-Content -Path (Join-Path $PSScriptRoot '..' 'README.md') -Raw
+            # The keys the script reads from the configuration.
+            $script:supportedKeys = @([regex]::Matches($scriptContent, '\$config\.PSObject\.Properties\[''(\w+)''\]') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            $wanted = 'Get-VersionTrimJobPlan', 'Assert-TrimOptions'
+            foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)) { . ([ScriptBlock]::Create($f.Extent.Text)) }
+
+            # The script's own configuration code, run as is on each example: the parsing and validation (from the first
+            # statement to the DryRun switch), the JIT prerequisites and the trim options check.
+            $statements = @($ast.EndBlock.Statements)
+            $first = -1; $last = -1
+            for ($i = 0; $i -lt $statements.Count; $i++) {
+                $statementText = $statements[$i].Extent.Text
+                if ($first -lt 0 -and $statementText.StartsWith('$hasInputJson =')) { $first = $i }
+                if ($first -ge 0 -and $last -lt 0 -and $statementText -match '^if \(\$DryRun\) \{') { $last = $i }
+            }
+            $script:parseBlock = ($statements[$first..$last] | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine
+            $script:jitBlock = (@($statements | Where-Object { $_.Extent.Text -match '^if \(\$AddSiteCollectionAdmin\) \{' }) | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine
+            $script:trimBlock = (@($statements | Where-Object { $_.Extent.Text.StartsWith('Assert-TrimOptions -ForceDeleteOldVersions') }) | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine
+
+            function Invoke-ExampleConfiguration {
+                param([string]$Path, [bool]$AzureAutomation)
+                $ConfigFile = $Path; $InputJson = ''; $ExportJobStatus = $false; $CleanupAdminsOnly = $false
+                $script:IsAzureAutomationRun = $AzureAutomation
+                . ([ScriptBlock]::Create($script:parseBlock))
+                . ([ScriptBlock]::Create($script:jitBlock))
+                . ([ScriptBlock]::Create($script:trimBlock))
+            }
+        }
+
+        It 'Finds the script code the validation runs on every example' {
+            $script:supportedKeys.Count | Should -BeGreaterThan 15
+            $script:supportedKeys | Should -Contain 'VersionPolicyMode'
+            $script:parseBlock | Should -Match 'ConvertFrom-Json'
+            $script:parseBlock | Should -Match 'if \(\$DryRun\) \{'
+            $script:jitBlock | Should -Match "AddSiteCollectionAdmin requires 'TenantAdminUrl'"
+            $script:trimBlock | Should -Match 'Assert-TrimOptions'
+        }
+
+        It 'Ships one example per documented scenario' {
+            $expected = 'SPSCleanVersions.example.json', 'SPSCleanVersions.legacy-count.example.json', 'SPSCleanVersions.auto-expiration.example.json',
+            'SPSCleanVersions.expire-after.example.json', 'SPSCleanVersions.tenant-wide.example.json', 'SPSCleanVersions.jit-admin.example.json',
+            'SPSCleanVersions.trim-only.example.json', 'SPSCleanVersions.trim-count.example.json', 'SPSCleanVersions.azure-automation.example.json'
+            @($expected | Where-Object { $_ -notin $script:examples.Name }) | Should -BeNullOrEmpty
+        }
+
+        It 'Every example is a JSON object that only uses keys the script reads' {
+            $problems = foreach ($e in $script:examples) {
+                try { $c = Get-Content -Path $e.FullName -Raw | ConvertFrom-Json -NoEnumerate -ErrorAction Stop }
+                catch { "$($e.Name): invalid JSON ($($_.Exception.Message))"; continue }
+                if ($c -isnot [System.Management.Automation.PSCustomObject]) { "$($e.Name): not a JSON object"; continue }
+                foreach ($k in $c.PSObject.Properties.Name) { if ($k -notin $script:supportedKeys) { "$($e.Name): unknown key '$k'" } }
+            }
+            @($problems) | Should -BeNullOrEmpty
+        }
+
+        It 'Every example holds placeholder values only and runs as a DryRun' {
+            $zero = '00000000-0000-0000-0000-000000000000'
+            $problems = foreach ($e in $script:examples) {
+                $raw = Get-Content -Path $e.FullName -Raw
+                $c = $raw | ConvertFrom-Json
+                if ($c.DryRun -ne $true) { "$($e.Name): DryRun must be true" }
+                foreach ($m in [regex]::Matches($raw, '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')) {
+                    if ($m.Value -ne $zero) { "$($e.Name): '$($m.Value)' is not the all-zero placeholder GUID" }
+                }
+                foreach ($m in [regex]::Matches($raw, 'https?://[^"\s]+')) {
+                    if ($m.Value -notmatch '^https://contoso(-admin)?\.sharepoint\.com(/|$)') { "$($e.Name): '$($m.Value)' is not a contoso placeholder URL" }
+                }
+            }
+            @($problems) | Should -BeNullOrEmpty
+        }
+
+        It 'Every example passes the configuration validation of the script' {
+            $problems = foreach ($e in $script:examples) {
+                try { $null = Invoke-ExampleConfiguration -Path $e.FullName -AzureAutomation ($e.Name -like '*azure-automation*') }
+                catch { "$($e.Name): $($_.Exception.Message)" }
+            }
+            @($problems) | Should -BeNullOrEmpty
+        }
+
+        It 'The validation refuses a mistaken configuration, so the check above means something' {
+            # The PnP parameter name (DeleteBeforeDays) is not the configuration key (ExpireVersionsAfterDays).
+            $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('example-' + [guid]::NewGuid().ToString('N') + '.json')
+            try {
+                Set-Content -Path $tmp -Value '{"SiteUrls":["https://contoso.sharepoint.com/sites/News"],"VersionPolicyMode":"ExpireAfter","DeleteBeforeDays":365}' -Encoding UTF8
+                { Invoke-ExampleConfiguration -Path $tmp -AzureAutomation $false } | Should -Throw "*requires 'ExpireVersionsAfterDays'*"
+                'DeleteBeforeDays' | Should -Not -BeIn $script:supportedKeys
+            }
+            finally { Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue }
+        }
+
+        It 'Every example is listed in the wiki, and the wiki only lists examples that exist' {
+            $names = @($script:examples.Name)
+            @($names | Where-Object { -not $script:wikiConfig.Contains($_) }) | Should -BeNullOrEmpty
+            $listed = @([regex]::Matches($script:wikiConfig, 'SPSCleanVersions(?:\.[a-z-]+)?\.example\.json') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+            @($listed | Where-Object { $_ -notin $names }) | Should -BeNullOrEmpty
+        }
+
+        It 'The README and the script help point to the examples' {
+            $script:readme | Should -Match 'Configuration#example-files'
+            $scriptContent | Should -Match 'Config/SPSCleanVersions\.<scenario>\.example\.json'
+            # Installed users (release archive, PowerShell Gallery) only have the script: the help needs a URL, not a path.
+            $scriptContent | Should -Match 'https://github\.com/luigilink/SPSCleanVersions/wiki/Configuration#example-files'
+        }
+    }
 }

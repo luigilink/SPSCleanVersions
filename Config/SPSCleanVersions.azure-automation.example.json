@@ -1,0 +1,11 @@
+{
+  "SiteUrls": [
+    "https://contoso.sharepoint.com/sites/News",
+    "https://contoso.sharepoint.com/sites/HR"
+  ],
+  "VersionPolicyMode": "ExpireAfter",
+  "ExpireVersionsAfterDays": 365,
+  "KeepMajorVersions": 100,
+  "ApplyTo": "New",
+  "DryRun": true
+}

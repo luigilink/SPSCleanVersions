@@ -1,0 +1,12 @@
+{
+  "SiteUrls": [
+    "https://contoso.sharepoint.com/sites/News",
+    "https://contoso.sharepoint.com/sites/HR"
+  ],
+  "ClientId": "00000000-0000-0000-0000-000000000000",
+  "VersionPolicyMode": "AutoExpiration",
+  "ApplyTo": "Both",
+  "ForceDeleteOldVersions": true,
+  "TrimJobMode": "Automatic",
+  "DryRun": true
+}

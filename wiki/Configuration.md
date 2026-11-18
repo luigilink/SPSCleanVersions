@@ -296,6 +296,24 @@ The report values are HTML-encoded, and a `DryRun` badge is shown when the run i
 
 ## Examples
 
+### Example files
+
+The [`Config/`](https://github.com/luigilink/SPSCleanVersions/tree/main/Config) folder of the repository has one ready-to-copy file per scenario (the release archive and the PowerShell Gallery package contain the script only, so download them from there). Copy the one that matches the job to a name of your own (real `Config/*.json` files are ignored by git), replace the placeholder values (`contoso`, the all-zero Client ID) and pass it with `-ConfigFile`. Every example has `"DryRun": true`: read the simulation, then set it to `false`.
+
+| File | Scenario |
+|---|---|
+| [`SPSCleanVersions.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.example.json) | Reference: every property at once, with representative values (the defaults are in the [properties table](#properties), and differ: for example `Legacy`, `50` versions and `DryRun` off). |
+| [`SPSCleanVersions.legacy-count.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.legacy-count.example.json) | `Legacy` (the default mode): major and minor version count limits per document library. |
+| [`SPSCleanVersions.auto-expiration.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.auto-expiration.example.json) | `AutoExpiration`: automatic expiration managed by SharePoint, then the automatic trim job for the existing versions. |
+| [`SPSCleanVersions.expire-after.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.expire-after.example.json) | `ExpireAfter`: versions expire after a number of days, then the age-based trim job for the existing versions. |
+| [`SPSCleanVersions.tenant-wide.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.tenant-wide.example.json) | Every site collection of the tenant (`SiteScope: All`), narrowed with `SiteFilter`, with the operator added as site collection admin where needed. |
+| [`SPSCleanVersions.jit-admin.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.jit-admin.example.json) | Selected sites where the operator is not site collection admin: added just in time, then removed (`AddSiteCollectionAdmin`). |
+| [`SPSCleanVersions.trim-only.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.trim-only.example.json) | Only submit the age-based trim job: the version policy is already in place. |
+| [`SPSCleanVersions.trim-count.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.trim-count.example.json) | Second pass of a trim with two criteria, once the age-based jobs have finished: count limits. |
+| [`SPSCleanVersions.azure-automation.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.azure-automation.example.json) | Azure Automation runbook (app-only): paste its content, as raw JSON, into the `InputJson` parameter. Site default for new libraries only, no trim job (see [limitations](./Getting-Started#azure-automation-app-only-limitations)). |
+
+In a `DryRun`, `AddSiteCollectionAdmin` only reports `would grant`: the sites the operator does not administer are not evaluated, except with `TrimOnly` (see [JIT site collection admin](#jit-site-collection-admin-addsitecollectionadmin)). The test suite checks that every example is valid JSON, uses only supported properties, holds placeholder values and passes the script's own validation.
+
 ### Apply an ExpireAfter site version policy
 
 Versions expire after 180 days, keeping up to 100 major versions, applied to new and existing document libraries.
@@ -331,7 +349,7 @@ Clears any site-level override so document libraries follow the tenant default.
 
 ### File-based configuration (local execution)
 
-Save a JSON file (e.g. `Config/contoso-PROD.json`, ignored by git) and pass it with `-ConfigFile`. A ready-to-copy template is provided in [`Config/SPSCleanVersions.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.example.json).
+Save a JSON file (e.g. `Config/contoso-PROD.json`, ignored by git) and pass it with `-ConfigFile`. A ready-to-copy template listing every property is provided in [`Config/SPSCleanVersions.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.example.json), and one example per scenario in the [example files](#example-files).
 
 ```json
 {
