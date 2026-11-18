@@ -1845,7 +1845,7 @@ Describe 'SPSCleanVersions Script' {
         BeforeAll {
             $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
             $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
-            $wanted = 'Test-IsAccessDeniedError', 'Remove-OperatorSiteAdmin', 'Save-AdminGrantRecord', 'Get-AdminGrantRecords', 'Test-UpnInAdminList'
+            $wanted = 'Test-IsAccessDeniedError', 'Remove-OperatorSiteAdmin', 'Save-AdminGrantRecord', 'Get-AdminGrantRecords', 'Test-UpnInAdminList', 'Test-JitGrantSimulated'
             $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $wanted -contains $n.Name }, $true)
             foreach ($f in $funcs) { . ([ScriptBlock]::Create($f.Extent.Text)) }
 
@@ -2030,6 +2030,89 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match '\} while \(\$retrySite\)'
             $scriptContent | Should -Match 'and -not \$siteWasGranted\) \{'
             $scriptContent | Should -Match '\$retrySite = \$true'
+        }
+
+        It 'Test-JitGrantSimulated simulates the grant in a DryRun, except for -ExportJobStatus and -CleanupAdminsOnly (functional)' {
+            Test-JitGrantSimulated -JitEnabled $true -DryRun $true -ExportJobStatus $false -CleanupAdminsOnly $false | Should -BeTrue
+            Test-JitGrantSimulated -JitEnabled $true -DryRun $false -ExportJobStatus $false -CleanupAdminsOnly $false | Should -BeFalse
+            Test-JitGrantSimulated -JitEnabled $false -DryRun $true -ExportJobStatus $false -CleanupAdminsOnly $false | Should -BeFalse
+            # -ExportJobStatus is read-only and ignores DryRun: it still needs the grant to read each site.
+            Test-JitGrantSimulated -JitEnabled $true -DryRun $true -ExportJobStatus $true -CleanupAdminsOnly $false | Should -BeFalse
+            # -CleanupAdminsOnly explicitly revokes earlier grants whatever DryRun says.
+            Test-JitGrantSimulated -JitEnabled $true -DryRun $true -ExportJobStatus $false -CleanupAdminsOnly $true | Should -BeFalse
+        }
+
+        It 'Computes the simulation flag once from the run mode, before the sign-in' {
+            $scriptContent | Should -Match '\$script:JitSimulated = Test-JitGrantSimulated -JitEnabled \$script:JitAdminEnabled -DryRun \(\[bool\]\$WhatIfPreference\) -ExportJobStatus \(\[bool\]\$ExportJobStatus\) -CleanupAdminsOnly \(\[bool\]\$CleanupAdminsOnly\)'
+            $idxFlag = $scriptContent.IndexOf('$script:JitSimulated = Test-JitGrantSimulated')
+            $idxSignIn = $scriptContent.IndexOf('Signing in once (interactive) via')
+            $idxFlag | Should -BeGreaterThan 0
+            $idxFlag | Should -BeLessThan $idxSignIn
+        }
+
+        It 'In a DryRun the per-site JIT step reports the grant and never grants, journals or revokes' {
+            $idxProbe = $scriptContent.IndexOf('if (Test-OperatorIsSiteAdmin -SiteUrl $SiteUrl')
+            $idxSimulated = $scriptContent.IndexOf('elseif ($script:JitSimulated) {', $idxProbe)
+            $idxJournal = $scriptContent.IndexOf('Save-AdminGrantRecord -Path $script:AdminGrantStateFile', $idxProbe)
+            $idxGrant = $scriptContent.IndexOf('Add-OperatorSiteAdmin -SiteUrl $SiteUrl', $idxProbe)
+            $idxSimulated | Should -BeGreaterThan $idxProbe
+            $idxSimulated | Should -BeLessThan $idxJournal
+            $idxSimulated | Should -BeLessThan $idxGrant
+            $branch = ([regex]::Match($scriptContent.Substring($idxSimulated), '^[\s\S]*?\r?\n            \}')).Value
+            $branch | Should -Match 'JIT: would grant site collection admin'
+            $branch | Should -Match '\$script:JitWouldGrant\+\+'
+            $branch | Should -Not -Match 'Add-OperatorSiteAdmin|Save-AdminGrantRecord|Remove-OperatorSiteAdmin|\$siteWasGranted = \$true'
+        }
+
+        It 'In a DryRun a site that cannot be read without the grant is reported as not evaluated, except with TrimOnly' {
+            $idxStep = $scriptContent.IndexOf('elseif ($script:JitSimulated) {')
+            $idxSkip = $scriptContent.IndexOf('if ($siteWouldGrant -and -not $TrimOnly) {')
+            $idxRetry = $scriptContent.IndexOf('# Resilient JIT retry:')
+            $idxStep | Should -BeGreaterThan 0
+            $idxSkip | Should -BeGreaterThan $idxStep
+            $idxSkip | Should -BeLessThan $idxRetry
+            $branch = ([regex]::Match($scriptContent.Substring($idxSkip), '^[\s\S]*?\r?\n        \}')).Value
+            $branch | Should -Match "Outcome 'Skipped'"
+            $branch | Should -Match '(?m)^\s*continue\s*$'
+        }
+
+        It 'In a DryRun an access-denied on a site that looked administered is reported, not granted and retried' {
+            $idxSimulated = $scriptContent.IndexOf('if ($script:JitSimulated -and (Test-IsAccessDeniedError -ErrorRecord $_)) {')
+            $idxReal = $scriptContent.IndexOf('elseif ((Test-IsAccessDeniedError -ErrorRecord $_) -and $script:JitAdminEnabled')
+            $idxSimulated | Should -BeGreaterThan 0
+            $idxSimulated | Should -BeLessThan $idxReal
+            $branch = ([regex]::Match($scriptContent.Substring($idxSimulated), '^[\s\S]*?\r?\n                \}')).Value
+            $branch | Should -Match "Outcome 'Skipped'"
+            $branch | Should -Not -Match 'Add-OperatorSiteAdmin|Save-AdminGrantRecord|\$retrySite = \$true'
+        }
+
+        It 'Reports would-grant in the DryRun summary and keeps the granted/revoked summary for real runs' {
+            $scriptContent | Should -Match '\$script:JitWouldGrant = 0'
+            $scriptContent | Should -Match 'JIT  \$\(\$script:JitWouldGrant\) would grant \(DryRun: no site collection admin was granted or revoked\)'
+            $scriptContent | Should -Match 'JIT  \$\(\$script:JitGranted\) granted - \$\(\$script:JitRevoked\) revoked - \$\(\$script:JitRevokeFailed\) revoke-failed'
+        }
+
+        It 'Tells at sign-in that a DryRun grants and journals nothing, and keeps the journal message for real runs' {
+            $scriptContent | Should -Match "DryRun: no site collection admin is granted or revoked; a site where the operator is not already an admin is reported as 'would grant'"
+            $scriptContent | Should -Match 'Grants are journalled to:'
+        }
+
+        It 'Top-level variables never share a name with a $script: variable (PowerShell variable names are case-insensitive)' {
+            # A per-site flag named like a script-scope counter silently overwrites it ($jitX = $false vs $script:JitX++).
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            $scriptVars = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.IsScript }, $true) |
+                ForEach-Object { $_.VariablePath.UserPath -replace '^(?i)script:', '' } | Sort-Object -Unique
+            $plainTop = $ast.FindAll({
+                    param($n)
+                    if ($n -isnot [System.Management.Automation.Language.AssignmentStatementAst]) { return $false }
+                    if ($n.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) { return $false }
+                    if ($n.Left.VariablePath.IsScript -or $n.Left.VariablePath.IsGlobal) { return $false }
+                    for ($p = $n.Parent; $p; $p = $p.Parent) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $false } }
+                    return $true
+                }, $true) | ForEach-Object { $_.Left.VariablePath.UserPath } | Sort-Object -Unique
+            $known = [System.Collections.Generic.HashSet[string]]::new([string[]]@($scriptVars), [System.StringComparer]::OrdinalIgnoreCase)
+            @($plainTop | Where-Object { $known.Contains($_) }) | Should -BeNullOrEmpty
         }
     }
 }

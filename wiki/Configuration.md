@@ -45,7 +45,7 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 | `ForceDeleteOldVersions` | boolean | No | `false` | When `true`, submits a **file version trim job** on each site (`New-PnPSiteFileVersionBatchDeleteJob`) so that **existing** versions are cleaned: a version policy only governs versions created afterwards. The job matches `VersionPolicyMode`: `ExpireAfter` trims **by age** (`ExpireVersionsAfterDays`), `AutoExpiration` uses the **automatic** algorithm, `Legacy` / `NoExpiration` / `InheritFromTenant` trim **by count** (`KeepMajorVersions` / `KeepMinorVersions`). See [Trimming existing versions](#trimming-existing-versions-forcedeleteoldversions). Deleted versions are **permanently deleted**. **Requires delegated user context** — automatically skipped in Azure Automation. |
 | `TrimJobMode` | string | No | `Auto` | Which trim job `ForceDeleteOldVersions` submits: `Auto` (follows `VersionPolicyMode`), `Age`, `Count` or `Automatic`. A job applies one criterion and a site accepts one job at a time, so forcing the job lets a run do **one pass per criterion**. Ignored (with a warning) when `ForceDeleteOldVersions` is `false`. See [Choosing the trim job](#choosing-the-trim-job-trimjobmode). |
 | `TrimOnly` | boolean | No | `false` | When `true` (with `ForceDeleteOldVersions: true`), the script **only submits the trim job** on each site: the site version policy is not read or changed and no library is listed. Delegated runs only. See [Submitting trim jobs only](#submitting-trim-jobs-only-trimonly). |
-| `DryRun` | boolean | No | `false` | When `true`, simulates all changes without applying them. Use this instead of `-WhatIf` when running as an Azure Automation Runbook. |
+| `DryRun` | boolean | No | `false` | When `true`, simulates all changes without applying them. Use this instead of `-WhatIf` when running as an Azure Automation Runbook. With `AddSiteCollectionAdmin`, no site collection admin is granted or revoked either (see [JIT site collection admin](#jit-site-collection-admin-addsitecollectionadmin)). |
 | `VersionPolicyMode` | string | No | `Legacy` | Version policy mechanism. `Legacy` keeps the per-library count-based `Set-PnPList` behaviour. `AutoExpiration`, `ExpireAfter`, `NoExpiration` and `InheritFromTenant` apply a site-level policy via `Set-PnPSiteVersionPolicy`. See [Version policy modes](#version-policy-modes). |
 | `ExpireVersionsAfterDays` | integer | No | `0` | Number of days after which versions expire. Used by `ExpireAfter` (must be **>= 30**). `NoExpiration` forces `0`. |
 | `ApplyTo` | string | No | `Both` | `New`, `Existing` or `Both` document libraries. Maps to `-ApplyToNewDocumentLibraries` / `-ApplyToExistingDocumentLibraries`. Site version policy modes only. |
@@ -54,7 +54,7 @@ Both sources are parsed with `ConvertFrom-Json` and share the exact same schema,
 | `SiteFilter` | string | No | — | Optional server-side `-Filter` passed to `Get-PnPTenantSite` to narrow the enumeration when `SiteScope` is `All` (e.g. `"Url -like 'sales'"`). |
 | `EnableReport` | boolean | No | `true` | Write a local HTML report of the run to `Results/` (plus a machine-readable `SPSCleanVersions-<timestamp>.json` next to it). The report has **Site / Scope / Library / Outcome / Major / Minor / ExpireAfterDays / Detail** columns; Legacy mode reports one row per document library. **Local execution only** — no report is produced when running in Azure Automation. |
 | `EnumerateLibraries` | boolean | No | `false` | Site version policy modes only. When `true`, also list the document libraries *in scope* for each site as informative `InScope` rows in the report. The policy applies to existing libraries via an **asynchronous server job**, so these rows carry no per-library Applied/Failed status. Adds a `Get-PnPList` call per site — leave off for large tenant-scale runs. |
-| `AddSiteCollectionAdmin` | boolean | No | `false` | **Delegated runs only.** When `true`, temporarily add the signed-in operator as **site collection administrator** on each site it is not already an admin of, process the site, then revoke. Requires `TenantAdminUrl` and the **SharePoint Administrator** role (checked up front). Ignored under app-only (Azure Automation). See [JIT site collection admin](#jit-site-collection-admin-addsitecollectionadmin). |
+| `AddSiteCollectionAdmin` | boolean | No | `false` | **Delegated runs only.** When `true`, temporarily add the signed-in operator as **site collection administrator** on each site it is not already an admin of, process the site, then revoke. Requires `TenantAdminUrl` and the **SharePoint Administrator** role (checked up front). Ignored under app-only (Azure Automation). In a `DryRun` nothing is granted or revoked: the site is reported as *would grant*. See [JIT site collection admin](#jit-site-collection-admin-addsitecollectionadmin). |
 | `LogRetentionDays` | integer | No | `180` | Prune `Logs/` and `Results/` files older than this many days (local only). `0` disables pruning. |
 
 ## Version policy modes
@@ -152,6 +152,7 @@ A trim job is asynchronous, and SharePoint does not keep the state of a complete
 
 - **Read-only.** No version policy is read or changed and no job is submitted, whatever `DryRun`, `ForceDeleteOldVersions`, `TrimOnly` or `TrimJobMode` say, so the configuration file of the run that submitted the jobs can be reused as is.
 - **Local (delegated) runs only**, with the same sign-in rules as a normal run: the account must be a site collection administrator on each site, or `AddSiteCollectionAdmin` must be on. `SiteScope: All` works too.
+- **With `AddSiteCollectionAdmin`, the operator is still added and removed on each site it does not administer, even when `DryRun` is `true`**: this mode ignores `DryRun` and reading the status needs the access. It is also how to find out which sites cannot be reached (`AccessDenied`, `NotFound`, `Failed` rows) before a run that submits jobs.
 - **Output:** `Results/SPSCleanVersions-JobStatus-<timestamp>.csv` (UTF-8 with BOM and the list separator of the current culture, so it opens straight in Excel), next to the usual log, report and JSON. There is one row per site, including the sites that could not be read (`AccessDenied`, `NotFound`, `Failed`), so a missing site is visible.
 - **Columns:** `Url`, `Status`, `BatchDeleteMode`, `RequestTimeInUTC`, `LastProcessTimeInUTC`, `CompleteTimeInUTC`, `DeleteOlderThanInUTC`, `MajorVersionLimit`, `MajorWithMinorVersionsLimit`, `FilesProcessed`, `VersionsProcessed`, `VersionsDeleted`, `VersionsFailed`, `StorageReleasedInBytes`, `ErrorMessage`, `ExportedAtUtc`.
 - **Values:** `Status` is the value returned by SharePoint, for example `New` (the job is queued), `CompleteSuccess` (it has finished) or `NoRequestFound` (no job is kept for the site). The four date columns are written as `yyyy-MM-dd HH:mm:ss` (UTC): SharePoint returns them as `MM/dd/yyyy` text, which a spreadsheet would read in the local order. `DeleteOlderThanInUTC` is empty for a count-based job, and the two limit columns are empty for an age-based one.
@@ -206,6 +207,16 @@ tenant-wide access).
 - The signed-in operator must hold the **SharePoint Administrator** role. If not, the run stops
   immediately with a clear message rather than half-elevating a large batch.
 
+**DryRun** — with `"DryRun": true` the administrators of a site are never changed. The script still
+checks whether the operator is already an admin (a read), but for a site where it is not, it only
+reports `JIT: would grant site collection admin ...`: nothing is granted, journalled or revoked, and
+the end-of-run summary reads `JIT  N would grant`. A site cannot be read without the grant, so a
+DryRun cannot evaluate it: with `TrimOnly` it still reports `WouldSubmit` (the job needs no site
+access), with any other mode it is reported as `Skipped` (not evaluated). To find out which sites
+cannot be reached, run [`-ExportJobStatus`](#tracking-trim-jobs-exportjobstatus) on them: it
+is read-only but does perform the grant and the revoke. `-ExportJobStatus` and `-CleanupAdminsOnly`
+ignore `DryRun`.
+
 **Recovering from an interruption** — if the run is killed between a grant and its revoke, the
 operator may remain admin on some sites. Re-run with `-CleanupAdminsOnly` to revoke everything
 recorded in the state file:
@@ -226,7 +237,7 @@ loses site access, so a revoke that returns access-denied is treated as *already
 > Grants recorded for a different operator are **not** revoked (they are reported in a warning); that
 > operator must run the cleanup themselves.
 
-The end-of-run summary reports `granted / revoked / revoke-failed`; a non-zero **revoke-failed**
+The end-of-run summary reports `granted / revoked / revoke-failed` (`would grant` in a DryRun); a non-zero **revoke-failed**
 count triggers a warning telling you to run `-CleanupAdminsOnly`.
 
 > **Security note.** Grants are temporary and per-site, journalled for audit, and removed at the end

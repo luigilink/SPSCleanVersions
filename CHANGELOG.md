@@ -5,6 +5,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- SPSCleanVersions.ps1
+  - **`DryRun` no longer grants or revokes site collection admin** (#65). With `AddSiteCollectionAdmin`, a
+    DryRun still added the operator as site collection admin on every site it did not administer and removed
+    it afterwards, because `Set-PnPTenantSite -Owners` and `Remove-PnPSiteCollectionAdmin` do not honour
+    `-WhatIf`: the administrators of each site were changed twice during a simulation (recorded in the audit
+    log) and the grant journal was written. Now nothing is granted, journalled or revoked: a site where the
+    operator is not already an admin is reported as `would grant` (`JIT  N would grant (DryRun: …)` in the
+    summary). Such a site cannot be read without the grant, so `TrimOnly` still reports `WouldSubmit` for it
+    (the job needs no site access) and any other mode reports it as `Skipped` (not evaluated).
+    `-ExportJobStatus` (read-only) and `-CleanupAdminsOnly` ignore `DryRun` and behave as before.
+    **Behaviour change:** a DryRun with `AddSiteCollectionAdmin` no longer evaluates the sites the operator
+    does not administer (policy modes) and no longer surfaces the sites whose grant would fail (deleted or
+    locked sites): `-ExportJobStatus` does, as it still grants and revokes.
+
+### Documentation
+
+- Wiki (Configuration, Usage) and script help: what `DryRun` and `-ExportJobStatus` do with
+  `AddSiteCollectionAdmin`.
+
 ## [3.5.0] - 2026-11-18
 
 ### Added
