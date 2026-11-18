@@ -97,6 +97,9 @@
                               administrator on each site it is not already an admin of, process the
                               site, then revoke. Requires 'TenantAdminUrl' and the SharePoint
                               Administrator role. Ignored under app-only (Azure Automation).
+                              With DryRun nothing is granted or revoked: a site where the operator
+                              is not already an admin is reported as 'would grant'. -ExportJobStatus
+                              and -CleanupAdminsOnly ignore DryRun.
       - LogRetentionDays      (integer, optional, default: 180) — prune Logs/ and Results/ files
                               older than this many days (local only). 0 disables pruning.
 
@@ -1473,6 +1476,28 @@ function Test-IsSharePointAdmin {
     }
 }
 
+function Test-JitGrantSimulated {
+    <#
+        .SYNOPSIS
+        Returns $true when the JIT site collection admin grant must be simulated (reported, not
+        performed) because the run is a DryRun. A DryRun must not change anything on the tenant, and
+        that includes the administrators of a site: the grant (Set-PnPTenantSite -Owners) and its
+        revoke (Remove-PnPSiteCollectionAdmin) do not honour -WhatIf, so they are skipped.
+
+        -ExportJobStatus and -CleanupAdminsOnly ignore DryRun by design: the first is read-only and
+        still needs the grant to read each site, the second explicitly revokes earlier grants.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)] [bool] $JitEnabled,
+        [Parameter(Mandatory = $true)] [bool] $DryRun,
+        [Parameter(Mandatory = $true)] [bool] $ExportJobStatus,
+        [Parameter(Mandatory = $true)] [bool] $CleanupAdminsOnly
+    )
+    return [bool]($JitEnabled -and $DryRun -and -not $ExportJobStatus -and -not $CleanupAdminsOnly)
+}
+
 function Test-OperatorIsSiteAdmin {
     <#
         .SYNOPSIS
@@ -1703,6 +1728,8 @@ if ($CleanupAdminsOnly) {
     }
 }
 $script:NeedAdminCenter = $script:JitAdminEnabled -or [bool]$CleanupAdminsOnly
+# A DryRun never changes the administrators of a site: with AddSiteCollectionAdmin the grant is reported, not performed.
+$script:JitSimulated = Test-JitGrantSimulated -JitEnabled $script:JitAdminEnabled -DryRun ([bool]$WhatIfPreference) -ExportJobStatus ([bool]$ExportJobStatus) -CleanupAdminsOnly ([bool]$CleanupAdminsOnly)
 
 # Trim options: fail fast, before any sign-in, on a combination or a trim plan that cannot work
 # (once for the whole run, rather than as one 'Failed' row per site).
@@ -1765,7 +1792,12 @@ if (-not $script:IsAzureAutomationRun) {
             if (-not (Test-IsSharePointAdmin -AdminUrl $TenantAdminUrl -Connection $script:DelegatedAuthConnection)) {
                 throw "AddSiteCollectionAdmin requires the SharePoint Administrator role for '$($script:OperatorUpn)' (needed to grant/revoke site collection admins). Assign the role or run without AddSiteCollectionAdmin."
             }
-            Write-Output "JIT site collection admin enabled for operator '$($script:OperatorUpn)' (SharePoint Administrator confirmed). Grants are journalled to: $($script:AdminGrantStateFile)"
+            if ($script:JitSimulated) {
+                Write-Output "JIT site collection admin enabled for operator '$($script:OperatorUpn)' (SharePoint Administrator confirmed). DryRun: no site collection admin is granted or revoked; a site where the operator is not already an admin is reported as 'would grant'."
+            }
+            else {
+                Write-Output "JIT site collection admin enabled for operator '$($script:OperatorUpn)' (SharePoint Administrator confirmed). Grants are journalled to: $($script:AdminGrantStateFile)"
+            }
         }
     }
 }
@@ -1832,6 +1864,7 @@ if ($SiteScope -eq 'All') {
 }
 
 $script:JitGranted = 0
+$script:JitWouldGrant = 0
 $script:JitRevoked = 0
 $script:JitRevokeFailed = 0
 
@@ -1849,6 +1882,7 @@ foreach ($SiteUrl in $SiteUrls) {
     }
     Write-SpsLine -Kind site -Message $SiteUrl
     $siteWasGranted = $false
+    $siteWouldGrant = $false
 
     try {
         # JIT site collection admin (delegated only): if the operator is not already an admin on this
@@ -1858,6 +1892,12 @@ foreach ($SiteUrl in $SiteUrls) {
         if ($script:JitAdminEnabled) {
             if (Test-OperatorIsSiteAdmin -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn -AdminConnection $script:DelegatedAuthConnection) {
                 Write-SpsLine -Detail -Kind skip -Message 'JIT: operator is already a site collection admin; no grant needed.'
+            }
+            elseif ($script:JitSimulated) {
+                # DryRun never changes the administrators of a site: report the grant instead of performing it.
+                $siteWouldGrant = $true
+                $script:JitWouldGrant++
+                Write-SpsLine -Detail -Kind jit -Message "JIT: would grant site collection admin ($($script:OperatorUpn)) (DryRun: not granted)."
             }
             else {
                 Save-AdminGrantRecord -Path $script:AdminGrantStateFile -SiteUrl $SiteUrl -OperatorUpn $script:OperatorUpn
@@ -1871,6 +1911,14 @@ foreach ($SiteUrl in $SiteUrls) {
                     continue
                 }
             }
+        }
+
+        # Without the grant a DryRun cannot read the site: TrimOnly still reports the job it would submit (it needs
+        # no site access), any other mode reports the site as not evaluated.
+        if ($siteWouldGrant -and -not $TrimOnly) {
+            Write-SpsLine -Detail -Kind skip -Message 'Not evaluated in DryRun: the operator is not a site collection admin here and the JIT grant is not performed.'
+            Add-RunResult -SiteUrl $SiteUrl -Scope $($script:RunScope) -Outcome 'Skipped' -Detail 'DryRun: the operator is not a site collection admin on this site and the JIT grant is not performed in DryRun, so the site is not evaluated.'
+            continue
         }
 
         # Resilient JIT retry: a site can pass the "already admin" probe yet still deny the
@@ -2156,7 +2204,13 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
         }
             }
             catch {
-                if ((Test-IsAccessDeniedError -ErrorRecord $_) -and $script:JitAdminEnabled -and -not (Test-IsAzureAutomation) -and -not $siteWasGranted) {
+                if ($script:JitSimulated -and (Test-IsAccessDeniedError -ErrorRecord $_)) {
+                    # DryRun never changes the administrators of a site: report the grant this site would need.
+                    if (-not $siteWouldGrant) { $siteWouldGrant = $true; $script:JitWouldGrant++ }
+                    Write-SpsLine -Detail -Kind jit -Message "JIT: access denied on $SiteUrl though the operator appeared to be a site collection admin; it would be granted site collection admin and the site retried (DryRun: not granted)."
+                    Add-RunResult -SiteUrl $SiteUrl -Scope $($script:RunScope) -Outcome 'Skipped' -Detail 'DryRun: access denied although the operator appeared to be a site collection admin; the JIT grant and the retry are not performed in DryRun.'
+                }
+                elseif ((Test-IsAccessDeniedError -ErrorRecord $_) -and $script:JitAdminEnabled -and -not (Test-IsAzureAutomation) -and -not $siteWasGranted) {
                     # The pre-flight probe said the operator was already an admin, so we skipped the
                     # grant - but the site denied the privileged operation. Grant just-in-time now and
                     # retry once; the grant is revoked in the finally block like any other JIT grant.
@@ -2323,7 +2377,12 @@ if (($sumSubmitted + $sumWouldSubmit + $sumInProgress) -gt 0) {
     if ($sumInProgress -gt 0) { Write-SpsLine -Detail -Kind skip -Message "$sumInProgress site(s) already have a trim job running: run them again later" }
 }
 if ($script:JitAdminEnabled) {
-    Write-SpsLine -Detail -Kind jit -Message "JIT  $($script:JitGranted) granted - $($script:JitRevoked) revoked - $($script:JitRevokeFailed) revoke-failed"
+    if ($script:JitSimulated) {
+        Write-SpsLine -Detail -Kind jit -Message "JIT  $($script:JitWouldGrant) would grant (DryRun: no site collection admin was granted or revoked)"
+    }
+    else {
+        Write-SpsLine -Detail -Kind jit -Message "JIT  $($script:JitGranted) granted - $($script:JitRevoked) revoked - $($script:JitRevokeFailed) revoke-failed"
+    }
 }
 Write-SpsRule
 if ($sumAccessDenied -gt 0) {

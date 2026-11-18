@@ -58,7 +58,7 @@ A switch selects a read-only mode: **`-ExportJobStatus`** reads the trim job sta
 | `SiteFilter` | string | No | — | Server-side `-Filter` for `Get-PnPTenantSite` when `SiteScope` is `All`. |
 | `EnableReport` | boolean | No | `true` | Write a local HTML report to `Results/` (plus a machine-readable `SPSCleanVersions-<timestamp>.json`) — local execution only. |
 | `EnumerateLibraries` | boolean | No | `false` | Site policy modes only. Also list the in-scope document libraries as informative `InScope` rows (adds a `Get-PnPList` per site). |
-| `AddSiteCollectionAdmin` | boolean | No | `false` | Delegated only. Temporarily add the operator as site collection admin per site (JIT), then revoke. Needs `TenantAdminUrl` + SharePoint Administrator role. See [Configuration](./Configuration#jit-site-collection-admin-addsitecollectionadmin). |
+| `AddSiteCollectionAdmin` | boolean | No | `false` | Delegated only. Temporarily add the operator as site collection admin per site (JIT), then revoke. Needs `TenantAdminUrl` + SharePoint Administrator role. Nothing is granted in a `DryRun` (reported as *would grant*). See [Configuration](./Configuration#jit-site-collection-admin-addsitecollectionadmin). |
 | `LogRetentionDays` | integer | No | `180` | Prune `Logs/`/`Results/` files older than N days (local only; `0` disables). |
 
 See the [Configuration](./Configuration) page for the full reference and more examples.
