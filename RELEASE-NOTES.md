@@ -1,37 +1,28 @@
 # SPSCleanVersions - Release Notes
 
-## [3.5.0] - 2026-11-18
+## [3.5.1] - 2026-11-18
 
 ### Added
 
-- SPSCleanVersions.ps1
-  - **Trim control for large batches.** `TrimJobMode` (`Auto`, `Age`, `Count`, `Automatic`) chooses the trim
-    job that `ForceDeleteOldVersions` submits, and `TrimOnly` submits only that job, without reading or
-    changing the site version policy. A job applies one criterion and a site accepts one job at a time, so a
-    run can do one pass per criterion (for example age first, then count).
-  - **`-ExportJobStatus`.** Reads the trim job state of each site and writes a dated CSV (status, times,
-    versions deleted, storage released, error), one row per site, including the sites that could not be
-    read. Run it soon after the jobs finish: SharePoint does not keep the state of a completed job
-    indefinitely. Local (delegated) runs only.
-  - Trim job submissions now appear in the report and in the JSON results (`Submitted`, `WouldSubmit`,
-    `InProgress`, `Failed`).
-
-### Changed
-
-- SPSCleanVersions.ps1
-  - **The age-based trim job is refused when its cut-off falls before January 1, 2023**, because that job
-    always deletes every version created before that date. The run stops before the sign-in and tells the
-    largest value accepted.
+- **Example configuration files, one per scenario** in `Config/`: `legacy-count`, `auto-expiration`,
+  `expire-after`, `tenant-wide`, `jit-admin`, `trim-count` and `azure-automation`, next to the existing
+  `trim-only` example and the full template. Each one holds placeholder values only and `"DryRun": true`.
+  The new *Example files* section of the wiki (Configuration) lists them and says when to use each one, and
+  the `-ConfigFile` help links to it: the release archive and the PowerShell Gallery package contain the
+  script only.
 
 ### Fixed
 
 - SPSCleanVersions.ps1
-  - **`ForceDeleteOldVersions` trims existing versions according to the version policy mode.** It used to
-    always submit a count-limit trim job, so with `ExpireAfter` the versions older than
-    `ExpireVersionsAfterDays` were never removed (a policy only governs versions created afterwards).
-    It now submits an **age-based** job for `ExpireAfter` and the **automatic** job for `AutoExpiration`;
-    `Legacy`, `NoExpiration` and `InheritFromTenant` keep the count-limit job. The run log and the
-    `DryRun` message tell which kind of job is submitted. See the new *Trimming existing versions*
-    section of the wiki (permanent deletion, asynchronous jobs, final pass for age-based rules).
+  - **`DryRun` no longer grants or revokes site collection admin.** With `AddSiteCollectionAdmin`, a DryRun
+    used to add the operator as site collection administrator on every site it did not administer and remove
+    it afterwards, because the cmdlets that do it do not honour `-WhatIf`: the administrators of each site
+    were changed twice during a simulation. Now nothing is granted, journalled or revoked, and such a site is
+    reported as *would grant* (`JIT  N would grant` in the summary).
+  - **Behaviour change in a DryRun with `AddSiteCollectionAdmin`.** A site cannot be read without the grant,
+    so `TrimOnly` still reports `WouldSubmit` for it (the job needs no site access) and any other mode
+    reports it as `Skipped` (not evaluated). The sites whose grant would fail (deleted or locked sites) are
+    no longer surfaced by a DryRun: `-ExportJobStatus` still does, because it is read-only, ignores `DryRun`
+    and still grants and revokes. `-CleanupAdminsOnly` also ignores `DryRun`.
 
 A full list of changes in each version can be found in the [change log](CHANGELOG.md)
