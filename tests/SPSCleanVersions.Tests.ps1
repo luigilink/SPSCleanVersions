@@ -2171,7 +2171,7 @@ Describe 'SPSCleanVersions Script' {
 
         It 'Every example is a JSON object that only uses keys the script reads' {
             $problems = foreach ($e in $script:examples) {
-                try { $c = Get-Content -Path $e.FullName -Raw | ConvertFrom-Json -ErrorAction Stop }
+                try { $c = Get-Content -Path $e.FullName -Raw | ConvertFrom-Json -NoEnumerate -ErrorAction Stop }
                 catch { "$($e.Name): invalid JSON ($($_.Exception.Message))"; continue }
                 if ($c -isnot [System.Management.Automation.PSCustomObject]) { "$($e.Name): not a JSON object"; continue }
                 foreach ($k in $c.PSObject.Properties.Name) { if ($k -notin $script:supportedKeys) { "$($e.Name): unknown key '$k'" } }
