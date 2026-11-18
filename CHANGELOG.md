@@ -38,7 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **The age-based trim job is refused when its cut-off falls before January 1, 2023.** That job always
     deletes every version created before that date (Microsoft Learn, *Trim versions*), so an
     `ExpireVersionsAfterDays` that reaches further back would delete more than configured. The run stops
-    before the sign-in and tells the largest value accepted.
+    before the sign-in and tells the largest value accepted. Under Azure Automation, where the trim job is
+    never submitted, the check is not applied: a runbook keeps applying its version policy.
   - With `ForceDeleteOldVersions`, the result row count and the `Failed` count of a run can be higher than
     before: trim job submissions are now recorded as rows, and a failed submission counts as `Failed`.
 

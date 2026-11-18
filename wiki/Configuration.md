@@ -115,7 +115,7 @@ By default (`Auto`) the job follows `VersionPolicyMode`, as in the table above. 
 
 > **One criterion per job, so two passes.** A job cannot combine an age limit and a count limit (the cmdlet uses separate parameter sets and refuses the combination), and a site accepts one job at a time. To apply both, submit one job, wait until it has finished (see [Tracking trim jobs](#tracking-trim-jobs-exportjobstatus)), then submit the other with a second run.
 
-> **No cut-off before January 1, 2023.** Microsoft Learn documents that the age-based job always deletes every version created before January 1, 2023. The script therefore refuses an `ExpireVersionsAfterDays` whose cut-off date falls before that day and tells you the largest value it accepts, rather than deleting more than the configured value suggests. The check runs once, before the sign-in.
+> **No cut-off before January 1, 2023.** Microsoft Learn documents that the age-based job always deletes every version created before January 1, 2023. The script therefore refuses an `ExpireVersionsAfterDays` whose cut-off date falls before that day and tells you the largest value it accepts, rather than deleting more than the configured value suggests. The check runs once, before the sign-in, for local runs; in Azure Automation, where the trim job is never submitted, it is not applied, so a runbook that applies a version policy is not stopped by the window of a job it skips.
 
 ### Submitting trim jobs only (TrimOnly)
 

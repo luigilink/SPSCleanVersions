@@ -1096,6 +1096,9 @@ function Get-VersionTrimJobPlan {
         The age job deletes permanently, never touches versions created in the last 30 days, and always
         deletes every version created before January 1, 2023 (Microsoft Learn, "Trim versions"): a
         cutoff before that date would delete versions the value was meant to keep, so it is refused.
+        -SkipValidation builds the plan without those two checks. It is for Azure Automation (app-only),
+        where the trim job is never submitted: a runbook that applies a policy must not be stopped by
+        the window of a job it skips.
 
         Returns an object with Kind, Parameters (a splat table for the cmdlet) and Description.
     #>
@@ -1108,7 +1111,8 @@ function Get-VersionTrimJobPlan {
         [Parameter()] [int] $MajorVersions = 50,
         [Parameter()] [int] $MajorWithMinorVersions = 0,
         [Parameter()] [int] $ExpireAfterDays = 0,
-        [Parameter()] [datetime] $Now = (Get-Date)
+        [Parameter()] [datetime] $Now = (Get-Date),
+        [Parameter()] [switch] $SkipValidation
     )
     $kind = if ($TrimJobMode -ne 'Auto') {
         $TrimJobMode
@@ -1122,12 +1126,12 @@ function Get-VersionTrimJobPlan {
     }
     switch ($kind) {
         'Age' {
-            if ($ExpireAfterDays -lt 30) {
+            if (-not $SkipValidation -and $ExpireAfterDays -lt 30) {
                 throw "The age-based trim job (VersionPolicyMode 'ExpireAfter' or TrimJobMode 'Age') requires ExpireVersionsAfterDays greater than or equal to 30 (it cannot delete versions created in the last 30 days)."
             }
             $cutoff = $Now.Date.AddDays(-$ExpireAfterDays)
             $floor = [datetime]'2023-01-01'
-            if ($cutoff -lt $floor) {
+            if (-not $SkipValidation -and $cutoff -lt $floor) {
                 $maxDays = [int]($Now.Date - $floor).TotalDays
                 throw "The age-based trim job always deletes every version created before January 1, 2023, so ExpireVersionsAfterDays = $ExpireAfterDays (cutoff $($cutoff.ToString('yyyy-MM-dd'))) would delete versions it is meant to keep. Use at most $maxDays days."
             }
@@ -1164,7 +1168,9 @@ function Assert-TrimOptions {
         TrimOnly needs ForceDeleteOldVersions (it would have nothing to do) and a delegated run (the trim
         job API is not supported with app-only authentication), and the trim plan is validated once
         (mode, 30-day minimum, January 1, 2023 limit). -CleanupAdminsOnly only revokes grants and
-        skips the plan check. A TrimJobMode that is set without ForceDeleteOldVersions is ignored with a warning.
+        skips the plan check. Under Azure Automation the trim job is never submitted (app-only), so the plan
+        is not validated there: a runbook that applies a policy is not stopped by the window of a job it skips.
+        A TrimJobMode that is set without ForceDeleteOldVersions is ignored with a warning.
     #>
     [CmdletBinding()]
     param
@@ -1201,7 +1207,7 @@ function Assert-TrimOptions {
     }
     if ($ForceDeleteOldVersions) {
         $null = Get-VersionTrimJobPlan -Mode $VersionPolicyMode -TrimJobMode $TrimJobMode -MajorVersions $MajorVersions `
-            -MajorWithMinorVersions $MajorWithMinorVersions -ExpireAfterDays $ExpireAfterDays -Now $Now
+            -MajorWithMinorVersions $MajorWithMinorVersions -ExpireAfterDays $ExpireAfterDays -Now $Now -SkipValidation:$IsAzureAutomation
     }
     elseif ($TrimJobMode -ne 'Auto') {
         Write-Warning "'TrimJobMode' = '$TrimJobMode' is ignored because 'ForceDeleteOldVersions' is false: no trim job is submitted."
@@ -2103,7 +2109,8 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
         # policy mode (age / automatic / count), or the one forced by TrimJobMode, rather than always a
         # count-limit one. Never in -ExportJobStatus mode, which is read-only.
         if ($ForceDeleteOldVersions -and -not $ExportJobStatus) {
-            $trimPlan = Get-VersionTrimJobPlan -Mode $VersionPolicyMode -TrimJobMode $TrimJobMode -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions -ExpireAfterDays $ExpireVersionsAfterDays
+            # App-only runs skip the job below: build the plan for the report without the window checks.
+            $trimPlan = Get-VersionTrimJobPlan -Mode $VersionPolicyMode -TrimJobMode $TrimJobMode -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions -ExpireAfterDays $ExpireVersionsAfterDays -SkipValidation:(Test-IsAzureAutomation)
             $trimScope = "Trim ($($trimPlan.Kind))"
             if ($PSCmdlet.ShouldProcess($SiteUrl, "Submit $($trimPlan.Kind) file version trim job ($($trimPlan.Description))")) {
                 if (Test-IsAzureAutomation) {

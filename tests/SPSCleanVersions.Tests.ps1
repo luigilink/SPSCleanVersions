@@ -495,6 +495,10 @@ Describe 'SPSCleanVersions Script' {
             $scriptContent | Should -Match 'Get-VersionTrimJobPlan\s+-Mode\s+\$VersionPolicyMode\s+-TrimJobMode\s+\$TrimJobMode'
         }
 
+        It 'Should build the per-site trim plan without validation under Azure Automation' {
+            $scriptContent | Should -Match 'Get-VersionTrimJobPlan\s+-Mode\s+\$VersionPolicyMode\s+-TrimJobMode\s+\$TrimJobMode[^\r\n]*-SkipValidation:\(Test-IsAzureAutomation\)'
+        }
+
         It 'Should record every trim job outcome in the results (report and JSON)' {
             foreach ($o in 'Submitted', 'WouldSubmit', 'InProgress') {
                 $scriptContent | Should -Match "-Scope \`$trimScope -Outcome '$o'"
@@ -631,6 +635,19 @@ Describe 'SPSCleanVersions Script' {
             { Get-VersionTrimJobPlan -Mode 'ExpireAfter' -ExpireAfterDays ($maxDays + 1) -Now $script:now } | Should -Throw '*January 1, 2023*'
         }
 
+        It '-SkipValidation builds the plan without the 30-day and January 1, 2023 checks (Azure Automation never submits it)' {
+            $plan = Get-VersionTrimJobPlan -Mode 'ExpireAfter' -ExpireAfterDays 2000 -Now $script:now -SkipValidation
+            $plan.Kind | Should -Be 'Age'
+            $plan.Parameters.DeleteBeforeDays | Should -Be 2000
+            (Get-VersionTrimJobPlan -Mode 'Legacy' -TrimJobMode 'Age' -ExpireAfterDays 0 -Now $script:now -SkipValidation).Kind | Should -Be 'Age'
+        }
+
+        It '-SkipValidation still rejects an unknown mode and does not change the other plans' {
+            { Get-VersionTrimJobPlan -Mode 'Legacy' -TrimJobMode 'Nope' -SkipValidation } | Should -Throw
+            (Get-VersionTrimJobPlan -Mode 'AutoExpiration' -SkipValidation).Kind | Should -Be 'Automatic'
+            (Get-VersionTrimJobPlan -Mode 'Legacy' -MajorVersions 70 -SkipValidation).Parameters.MajorVersionLimit | Should -Be 70
+        }
+
         It 'The 2023 refusal tells the largest accepted value' {
             $maxDays = ($script:now - [datetime]'2023-01-01').Days
             { Get-VersionTrimJobPlan -Mode 'ExpireAfter' -ExpireAfterDays 2000 -Now $script:now } | Should -Throw "*Use at most $maxDays days*"
@@ -684,6 +701,18 @@ Describe 'SPSCleanVersions Script' {
 
         It 'Validates the trim plan once, before any site (January 1, 2023 limit)' {
             $a = $script:base.Clone(); $a.TrimOnly = $false; $a.TrimJobMode = 'Auto'; $a.ExpireAfterDays = 2000
+            { Assert-TrimOptions @a } | Should -Throw '*January 1, 2023*'
+        }
+
+        It 'Under Azure Automation the plan is not validated: the job is never submitted there (cutoff before 2023, ExpireAfter)' {
+            $a = $script:base.Clone(); $a.TrimOnly = $false; $a.TrimJobMode = 'Auto'; $a.IsAzureAutomation = $true; $a.ExpireAfterDays = 2000
+            { Assert-TrimOptions @a } | Should -Not -Throw
+            $a.ExpireAfterDays = 0; $a.TrimJobMode = 'Age'
+            { Assert-TrimOptions @a } | Should -Not -Throw
+        }
+
+        It 'Still validates the plan locally for the same settings' {
+            $a = $script:base.Clone(); $a.TrimOnly = $false; $a.TrimJobMode = 'Auto'; $a.IsAzureAutomation = $false; $a.ExpireAfterDays = 2000
             { Assert-TrimOptions @a } | Should -Throw '*January 1, 2023*'
         }
 
