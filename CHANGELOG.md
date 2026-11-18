@@ -5,6 +5,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Config/SPSCleanVersions.<scenario>.example.json`: one example configuration per scenario (#66):
+  `legacy-count`, `auto-expiration`, `expire-after`, `tenant-wide`, `jit-admin`, `trim-count` and
+  `azure-automation`, next to the existing `trim-only` example and the full template. Each one holds
+  placeholder values only and `"DryRun": true`.
+- Tests: every `Config/*.example.json` must be a valid JSON object that only uses properties the script reads,
+  hold placeholder values (`contoso`, the all-zero Client ID) and run as a DryRun, be listed in the wiki, and
+  pass the script's own configuration validation (the real parsing code, the JIT prerequisites and
+  `Assert-TrimOptions`, run on each file), so the examples cannot drift from the script.
+
 ### Fixed
 
 - SPSCleanVersions.ps1
@@ -25,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Wiki (Configuration, Usage) and script help: what `DryRun` and `-ExportJobStatus` do with
   `AddSiteCollectionAdmin`.
+- Wiki (Configuration), README and script help: new *Example files* section listing each example file and
+  when to use it.
 
 ## [3.5.0] - 2026-11-18
 

@@ -1,0 +1,11 @@
+{
+  "SiteUrls": [
+    "https://contoso.sharepoint.com/sites/News",
+    "https://contoso.sharepoint.com/sites/HR"
+  ],
+  "ClientId": "00000000-0000-0000-0000-000000000000",
+  "VersionPolicyMode": "Legacy",
+  "KeepMajorVersions": 50,
+  "KeepMinorVersions": 0,
+  "DryRun": true
+}
