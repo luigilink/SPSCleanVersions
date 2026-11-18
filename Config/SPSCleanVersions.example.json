@@ -13,6 +13,8 @@
   "SiteFilter": "",
   "ClientId": "00000000-0000-0000-0000-000000000000",
   "ForceDeleteOldVersions": false,
+  "TrimJobMode": "Auto",
+  "TrimOnly": false,
   "DryRun": true,
   "EnableReport": true,
   "EnumerateLibraries": false,

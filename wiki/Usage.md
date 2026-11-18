@@ -36,6 +36,8 @@ Configuration is provided as JSON, from one of two **mutually exclusive** parame
 
 > Parameter sets are **not** used (they are unsupported in Azure Automation runbooks); the script validates at runtime that exactly one source is provided.
 
+A switch selects a read-only mode: **`-ExportJobStatus`** reads the trim job state of each site and writes it to `Results/SPSCleanVersions-JobStatus-<timestamp>.csv` (local runs only; see [Example 7](#example-7-follow-the-trim-jobs-export-their-status)).
+
 ### JSON schema (shared by both sources)
 
 | Property | Type | Required | Default | Description |
@@ -45,6 +47,8 @@ Configuration is provided as JSON, from one of two **mutually exclusive** parame
 | `KeepMinorVersions` | integer | No | `0` | Minor versions to keep (maps to `-MajorWithMinorVersions`). |
 | `ClientId` | string | No | — | Azure AD App Registration / Managed Identity Client ID. |
 | `ForceDeleteOldVersions` | boolean | No | `false` | Submit a file version trim job on each site so existing versions are cleaned; the job follows `VersionPolicyMode` (age for `ExpireAfter`, automatic for `AutoExpiration`, count otherwise). Delegated context; skipped app-only. |
+| `TrimJobMode` | string | No | `Auto` | Trim job submitted by `ForceDeleteOldVersions`: `Auto` (follows `VersionPolicyMode`), `Age`, `Count` or `Automatic`. One criterion per job: use one pass per criterion. |
+| `TrimOnly` | boolean | No | `false` | With `ForceDeleteOldVersions`, submit **only** the trim job: the site version policy is not read or changed. Delegated context only. |
 | `DryRun` | boolean | No | `false` | Simulate changes without applying them (runbook-friendly `-WhatIf`). |
 | `VersionPolicyMode` | string | No | `Legacy` | `Legacy` (per-library `Set-PnPList`), or `AutoExpiration` / `ExpireAfter` / `NoExpiration` / `InheritFromTenant` (site-level `Set-PnPSiteVersionPolicy`). |
 | `ExpireVersionsAfterDays` | integer | No | `0` | Expiration window for `ExpireAfter` (must be `0` or `>= 30`). |
@@ -97,6 +101,14 @@ To trim by age with an expiration policy (versions older than 365 days are delet
 .\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/News"],"VersionPolicyMode":"ExpireAfter","ExpireVersionsAfterDays":365,"KeepMajorVersions":100,"ForceDeleteOldVersions":true,"DryRun":true}'
 ```
 
+To submit **only** the trim job, without reading or changing the version policy (the policy is already in place, or this is the second pass of a trim that uses two criteria), add `TrimOnly` and choose the job with `TrimJobMode`:
+
+```powershell
+.\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/News"],"ClientId":"<app id>","ForceDeleteOldVersions":true,"TrimOnly":true,"TrimJobMode":"Age","ExpireVersionsAfterDays":365,"DryRun":true}'
+```
+
+> **One criterion per job:** an age limit and a count limit cannot be combined in one job, and a site accepts one job at a time. Run the script once per criterion (`"TrimJobMode":"Age"`, then `"TrimJobMode":"Count"`) and wait for the first jobs to finish. The age-based job never deletes versions created in the last 30 days and the script refuses a cut-off before January 1, 2023, which that job always deletes (see [Configuration](./Configuration#choosing-the-trim-job-trimjobmode)).
+
 ### Example 5: Apply a site version policy with expiration
 
 Set `"VersionPolicyMode"` to a site-level mode to apply a policy via `Set-PnPSiteVersionPolicy`. The example below expires versions after 180 days and keeps up to 100 major versions, on new and existing libraries.
@@ -117,6 +129,16 @@ Set `"SiteScope": "All"` with a `TenantAdminUrl` to enumerate every site collect
 
 > **⚠️ Warning:** `SiteScope: All` can touch thousands of sites. Run with `"DryRun": true` first and consider narrowing with `SiteFilter`. See [Tenant-wide scope](./Configuration#tenant-wide-scope-sitescope-all).
 
+### Example 7: Follow the trim jobs (export their status)
+
+`-ExportJobStatus` is read-only: it reads the state of the trim job of each site (`Get-PnPSiteFileVersionBatchDeleteJobStatus`) and writes it to `Results/SPSCleanVersions-JobStatus-<timestamp>.csv`, one row per site with the status, the times, the versions deleted and the storage released. The same configuration file as the run that submitted the jobs can be used. Local (delegated) runs only.
+
+```powershell
+.\SPSCleanVersions.ps1 -ConfigFile '.\Config\trim-age.json' -ExportJobStatus
+```
+
+SharePoint does not keep the state of a completed job indefinitely, so export it soon after the jobs finish. See [Configuration](./Configuration#tracking-trim-jobs-exportjobstatus) for the columns and the summary line.
+
 ## Error Handling
 
 The script is designed to process a batch resiliently — one bad site never aborts the run:
@@ -125,6 +147,7 @@ The script is designed to process a batch resiliently — one bad site never abo
 - **Throttling (HTTP 429/503).** SharePoint calls are retried automatically, honouring the server `Retry-After` hint (capped at 300s) and otherwise using exponential backoff.
 - **Missing sites (`NotFound`, HTTP 404).** A site that does not exist, was deleted, or whose URL is malformed (e.g. a browser/OneDrive sharing URL) is reported with a dedicated `NotFound` outcome and **skipped**. A 404 is structural, so it **fails fast** — it is not retried — which keeps a stale list from slowing the run. `SiteUrls` are also normalized (query strings/fragments stripped, de-duplicated) before processing to avoid this whole class of failure.
 - **Authentication / token errors.** These are surfaced immediately (not retried, since retrying with the same token cannot recover them) with guidance to check the `ClientId` / app registration.
+- **Trim job already running (`InProgress`).** A site accepts one trim job at a time. When a previous job is still running, the new request is skipped (not retried) and the site is reported as `InProgress`: run it again later.
 - **Other per-site errors** are recorded as `Failed` with the error message in the report, and the run continues.
 
 Ensure the provided identity has access to the SharePoint sites being processed, and review the run summary line (`--- SPSCleanVersions finished: ... ---`) and the HTML report for per-site outcomes.

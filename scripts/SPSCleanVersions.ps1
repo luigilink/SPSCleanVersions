@@ -60,6 +60,17 @@
                               'Legacy', 'NoExpiration' and 'InheritFromTenant' trim by count
                               (KeepMajorVersions / KeepMinorVersions). Versions deleted by a trim job
                               are permanently deleted. Delegated context only.
+      - TrimJobMode           (string, optional, default: 'Auto') — Which trim job ForceDeleteOldVersions
+                              submits. 'Auto' follows VersionPolicyMode (see above). 'Age'
+                              (-DeleteBeforeDays ExpireVersionsAfterDays, >= 30), 'Count'
+                              (KeepMajorVersions / KeepMinorVersions) and 'Automatic' force that job
+                              whatever the policy mode. A job applies ONE criterion and a site runs ONE
+                              job at a time, so a count pass and an age pass are two runs. 'Age' is
+                              refused when its cutoff falls before January 1, 2023: the service always
+                              deletes every version created before that date.
+      - TrimOnly              (boolean, optional, default: false) — Only submit the trim job (requires
+                              ForceDeleteOldVersions): the version policy of the site and of its
+                              libraries is neither read nor changed. Delegated context only.
       - DryRun                (boolean, optional, default: false) — Simulate changes without applying them.
       - VersionPolicyMode     (string, optional, default: 'Legacy') — Version policy mechanism.
                               'Legacy' keeps the per-library count-based Set-PnPList behaviour.
@@ -107,6 +118,16 @@
     Path to the admin-grant state file to replay with -CleanupAdminsOnly. Defaults to the most
     recent SPSCleanVersions-admins-*.jsonl in the Logs/ folder.
 
+    .PARAMETER ExportJobStatus
+    Read-only report mode. Reads the state of the file-version trim job of each site
+    (Get-PnPSiteFileVersionBatchDeleteJobStatus) and writes it to
+    Results/SPSCleanVersions-JobStatus-<timestamp>.csv: status, times, versions deleted, storage released.
+    No version policy is read or changed and no job is submitted. Dates are written as yyyy-MM-dd HH:mm:ss
+    (UTC). SharePoint does not keep the state of a completed job indefinitely (the retention is not
+    documented; plan for about a month), so export it soon after the jobs finish. Uses the same
+    configuration (SiteUrls / SiteScope, ClientId, AddSiteCollectionAdmin) as a normal run. Local
+    (delegated) only.
+
     .EXAMPLE
     .\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/site1"],"KeepMajorVersions":100,"KeepMinorVersions":10}'
     Cleans version history for the specified site, keeping 100 major versions and 10 minor versions.
@@ -122,6 +143,14 @@
     .EXAMPLE
     .\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/site1"],"VersionPolicyMode":"ExpireAfter","ExpireVersionsAfterDays":180,"KeepMajorVersions":100}'
     Applies a site-level ExpireAfter version policy (versions expire after 180 days, 100 major versions) via Set-PnPSiteVersionPolicy.
+
+    .EXAMPLE
+    .\SPSCleanVersions.ps1 -InputJson '{"SiteUrls":["https://contoso.sharepoint.com/sites/site1"],"ClientId":"<app id>","ForceDeleteOldVersions":true,"TrimOnly":true,"TrimJobMode":"Age","ExpireVersionsAfterDays":365}'
+    Only submits the age-based trim job (versions older than 365 days) on the site; its version policy is not read or changed.
+
+    .EXAMPLE
+    .\SPSCleanVersions.ps1 -ConfigFile '.\sites.json' -ExportJobStatus
+    Reads the trim job state of every site in sites.json and writes it to Results/SPSCleanVersions-JobStatus-<timestamp>.csv.
 
     .NOTES
     FileName:	SPSCleanVersions.ps1
@@ -157,7 +186,11 @@ param
 
     [Parameter(HelpMessage = "Path to the admin-grant state file to replay with -CleanupAdminsOnly. Defaults to the most recent SPSCleanVersions-admins-*.jsonl in the Logs/ folder.")]
     [System.String]
-    $StateFile
+    $StateFile,
+
+    [Parameter(HelpMessage = "Report mode: read the file-version trim job status of each site and write it to Results/SPSCleanVersions-JobStatus-<timestamp>.csv. Read-only: no version policy is read or changed and no job is submitted. Local (delegated) runs only.")]
+    [switch]
+    $ExportJobStatus
 )
 
 #region --- Load and parse JSON input ---
@@ -276,6 +309,18 @@ if (-not $matchedApplyTo) {
 }
 $ApplyTo = $matchedApplyTo
 
+# Trim job options (used with ForceDeleteOldVersions). TrimJobMode picks the job: 'Auto' follows
+# VersionPolicyMode; 'Age', 'Count' and 'Automatic' force that job whatever the policy mode, so one
+# run can do one pass per criterion. TrimOnly submits the job and changes nothing else.
+$validTrimJobModes = @('Auto', 'Age', 'Count', 'Automatic')
+[string]$TrimJobMode = if ($config.PSObject.Properties['TrimJobMode']) { [string]$config.TrimJobMode } else { 'Auto' }
+$matchedTrimJobMode = $validTrimJobModes | Where-Object { $_ -ieq $TrimJobMode }
+if (-not $matchedTrimJobMode) {
+    throw "Invalid 'TrimJobMode' value '$TrimJobMode'. Allowed values: $($validTrimJobModes -join ', ')."
+}
+$TrimJobMode = $matchedTrimJobMode
+[bool]$TrimOnly = if ($config.PSObject.Properties['TrimOnly']) { $config.TrimOnly } else { $false }
+
 # ExpireVersionsAfterDays must be 0 (NoExpiration) or >= 30 (ExpireAfter), per the
 # Set-PnPSiteVersionPolicy contract. ExpireAfter additionally requires a value >= 30.
 if ($ExpireVersionsAfterDays -ne 0 -and $ExpireVersionsAfterDays -lt 30) {
@@ -287,8 +332,8 @@ if ($VersionPolicyMode -eq 'ExpireAfter' -and $ExpireVersionsAfterDays -lt 30) {
 
 # 'SiteScope: All' only makes sense for the site version policy modes; the Legacy
 # per-library path relies on an explicit SiteUrls list.
-if ($SiteScope -eq 'All' -and $VersionPolicyMode -eq 'Legacy') {
-    throw "'SiteScope' = 'All' is only supported with the site version policy modes (VersionPolicyMode: AutoExpiration, ExpireAfter, NoExpiration or InheritFromTenant), not 'Legacy'."
+if ($SiteScope -eq 'All' -and $VersionPolicyMode -eq 'Legacy' -and -not $TrimOnly -and -not $ExportJobStatus) {
+    throw "'SiteScope' = 'All' is only supported with the site version policy modes (VersionPolicyMode: AutoExpiration, ExpireAfter, NoExpiration or InheritFromTenant), not 'Legacy' (unless 'TrimOnly' or -ExportJobStatus, which do not use the policy)."
 }
 
 # Reporting / logging properties.
@@ -625,6 +670,8 @@ function Invoke-RetryCommand {
 #region --- Reporting helpers ---
 # Per-site result records collected during the run and rendered into the report.
 $script:RunResults = New-Object System.Collections.Generic.List[object]
+# One row per site for -ExportJobStatus (written to a CSV after the loop).
+$script:JobStatusRows = New-Object System.Collections.Generic.List[object]
 
 function Add-RunResult {
     param(
@@ -683,6 +730,10 @@ function Export-SPSCleanVersionsReport {
     $failed = @($rows | Where-Object { $_.Outcome -eq 'Failed' }).Count
     $accessDenied = @($rows | Where-Object { $_.Outcome -eq 'AccessDenied' }).Count
     $notFound = @($rows | Where-Object { $_.Outcome -eq 'NotFound' }).Count
+    $submitted = @($rows | Where-Object { $_.Outcome -eq 'Submitted' }).Count
+    $wouldSubmit = @($rows | Where-Object { $_.Outcome -eq 'WouldSubmit' }).Count
+    $inProgress = @($rows | Where-Object { $_.Outcome -eq 'InProgress' }).Count
+    $reported = @($rows | Where-Object { $_.Outcome -eq 'Reported' }).Count
     $appliedLabel = if ($DryRunMode) { 'Would apply' } else { 'Applied' }
     $appliedValue = if ($DryRunMode) { $wouldApply } else { $applied }
     $generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -725,6 +776,10 @@ tr.row-alert td{background:#fff5f5}
 .badge.AccessDenied{background:#e67e22}
 .badge.NotFound{background:#8e44ad}
 .badge.InScope{background:#0a7d8c}
+.badge.Submitted{background:var(--brand)}
+.badge.WouldSubmit{background:#6f42c1}
+.badge.InProgress{background:#9aa4ad}
+.badge.Reported{background:#0a7d8c}
 footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
 '@
 
@@ -742,6 +797,15 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
         [void]$sb.Append('<td>' + (ConvertTo-SPSHtmlEncoded ([string]$r.Detail)) + '</td></tr>')
     }
 
+    # Trim job / job status cards only when the run produced such rows, so earlier reports keep their layout.
+    $trimCards = ''
+    if (($submitted + $wouldSubmit + $inProgress) -gt 0) {
+        $trimLabel = if ($DryRunMode) { 'Trim jobs (would submit)' } else { 'Trim jobs submitted' }
+        $trimValue = if ($DryRunMode) { $wouldSubmit } else { $submitted }
+        $trimCards += "<div class=""card""><div class=""card-value"">$trimValue</div><div class=""card-label"">$trimLabel</div></div>"
+        if ($inProgress -gt 0) { $trimCards += "<div class=""card""><div class=""card-value"">$inProgress</div><div class=""card-label"">Trim job already running</div></div>" }
+    }
+    if ($reported -gt 0) { $trimCards += "<div class=""card""><div class=""card-value"">$reported</div><div class=""card-label"">Job status read</div></div>" }
     $failedCardClass = if ($failed -gt 0) { 'card accent' } else { 'card' }
     $accessDeniedCardClass = if ($accessDenied -gt 0) { 'card accent' } else { 'card' }
     $notFoundCardClass = if ($notFound -gt 0) { 'card accent' } else { 'card' }
@@ -757,7 +821,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:16px 0}
   <div class="cards">
     <div class="card"><div class="card-value">$distinctSites</div><div class="card-label">Sites processed</div></div>
     <div class="card"><div class="card-value">$total</div><div class="card-label">Results (rows)</div></div>
-    <div class="card"><div class="card-value">$appliedValue</div><div class="card-label">$appliedLabel</div></div>
+    <div class="card"><div class="card-value">$appliedValue</div><div class="card-label">$appliedLabel</div></div>$trimCards
     <div class="card"><div class="card-value">$skipped</div><div class="card-label">Skipped / compliant</div></div>
     <div class="$failedCardClass"><div class="card-value">$failed</div><div class="card-label">Failed</div></div>
     <div class="$accessDeniedCardClass"><div class="card-value">$accessDenied</div><div class="card-label">Access denied</div></div>
@@ -814,6 +878,7 @@ if (-not $script:IsAzureAutomationRun) {
     Clear-OldRunFiles -Path $script:LogsFolder -Retention $LogRetentionDays -Filter '*.jsonl'
     Clear-OldRunFiles -Path $script:ResultsFolder -Retention $LogRetentionDays -Filter '*.html'
     Clear-OldRunFiles -Path $script:ResultsFolder -Retention $LogRetentionDays -Filter '*.json'
+    Clear-OldRunFiles -Path $script:ResultsFolder -Retention $LogRetentionDays -Filter 'SPSCleanVersions-JobStatus-*.csv'
     # Persistent state file for JIT admin grants (JSON-lines). One per run; used to clean up an
     # interrupted run with -CleanupAdminsOnly.
     $script:AdminGrantStateFile = Join-Path -Path $script:LogsFolder -ChildPath ("SPSCleanVersions-admins-$($script:RunTimestamp).jsonl")
@@ -1006,21 +1071,26 @@ function Resolve-EffectiveApplyTo {
 function Get-VersionTrimJobPlan {
     <#
         .SYNOPSIS
-        Maps a version policy mode to the file-version trim job that matches it.
+        Maps a version policy mode (or an explicit TrimJobMode) to the file-version trim job to submit.
 
         .DESCRIPTION
         A version policy (site or library) only governs versions created after it was applied: the
         expiration date is stamped on a version when it is created and existing versions are never
         revisited. Existing versions can only be cleaned by a trim job, and
         New-PnPSiteFileVersionBatchDeleteJob runs ONE criterion per job (-DeleteBeforeDays,
-        -Automatic, or the two count limits), so ForceDeleteOldVersions must submit the job that
-        matches the policy that was just applied:
+        -Automatic, or the two count limits). With TrimJobMode 'Auto' the job matches the policy that
+        was just applied:
           ExpireAfter                              -> Age       (-DeleteBeforeDays <ExpireAfterDays>)
           AutoExpiration                           -> Automatic (-Automatic)
           Legacy / NoExpiration / InheritFromTenant -> Count     (-MajorVersionLimit / -MajorWithMinorVersionsLimit)
         InheritFromTenant stays count-based because the tenant policy is not read by the script.
-        For ExpireAfter the count limit of the policy is not enforced by the age job; SharePoint
-        trims it progressively when files are edited.
+        TrimJobMode 'Age', 'Count' or 'Automatic' forces that job whatever the policy mode, which
+        lets a run do one pass per criterion. For ExpireAfter the count limit of the policy is not
+        enforced by the age job; SharePoint trims it progressively when files are edited.
+
+        The age job deletes permanently, never touches versions created in the last 30 days, and always
+        deletes every version created before January 1, 2023 (Microsoft Learn, "Trim versions"): a
+        cutoff before that date would delete versions the value was meant to keep, so it is refused.
 
         Returns an object with Kind, Parameters (a splat table for the cmdlet) and Description.
     #>
@@ -1029,14 +1099,32 @@ function Get-VersionTrimJobPlan {
     param
     (
         [Parameter(Mandatory = $true)] [ValidateSet('Legacy', 'AutoExpiration', 'ExpireAfter', 'NoExpiration', 'InheritFromTenant')] [string] $Mode,
+        [Parameter()] [ValidateSet('Auto', 'Age', 'Count', 'Automatic')] [string] $TrimJobMode = 'Auto',
         [Parameter()] [int] $MajorVersions = 50,
         [Parameter()] [int] $MajorWithMinorVersions = 0,
-        [Parameter()] [int] $ExpireAfterDays = 0
+        [Parameter()] [int] $ExpireAfterDays = 0,
+        [Parameter()] [datetime] $Now = (Get-Date)
     )
-    switch ($Mode) {
-        'ExpireAfter' {
+    $kind = if ($TrimJobMode -ne 'Auto') {
+        $TrimJobMode
+    }
+    else {
+        switch ($Mode) {
+            'ExpireAfter' { 'Age' }
+            'AutoExpiration' { 'Automatic' }
+            default { 'Count' }
+        }
+    }
+    switch ($kind) {
+        'Age' {
             if ($ExpireAfterDays -lt 30) {
-                throw "Mode 'ExpireAfter' requires ExpireAfterDays greater than or equal to 30 (the age-based trim job cannot delete versions created in the last 30 days)."
+                throw "The age-based trim job (VersionPolicyMode 'ExpireAfter' or TrimJobMode 'Age') requires ExpireVersionsAfterDays greater than or equal to 30 (it cannot delete versions created in the last 30 days)."
+            }
+            $cutoff = $Now.Date.AddDays(-$ExpireAfterDays)
+            $floor = [datetime]'2023-01-01'
+            if ($cutoff -lt $floor) {
+                $maxDays = [int]($Now.Date - $floor).TotalDays
+                throw "The age-based trim job always deletes every version created before January 1, 2023, so ExpireVersionsAfterDays = $ExpireAfterDays (cutoff $($cutoff.ToString('yyyy-MM-dd'))) would delete versions it is meant to keep. Use at most $maxDays days."
             }
             return [pscustomobject]@{
                 Kind        = 'Age'
@@ -1044,7 +1132,7 @@ function Get-VersionTrimJobPlan {
                 Description = "versions older than $ExpireAfterDays days"
             }
         }
-        'AutoExpiration' {
+        'Automatic' {
             return [pscustomobject]@{
                 Kind        = 'Automatic'
                 Parameters  = @{ Automatic = $true }
@@ -1059,6 +1147,205 @@ function Get-VersionTrimJobPlan {
             }
         }
     }
+}
+
+function Assert-TrimOptions {
+    <#
+        .SYNOPSIS
+        Fails fast, before any sign-in, on trim options that cannot work, instead of once per site.
+
+        .DESCRIPTION
+        -ExportJobStatus is read-only: ForceDeleteOldVersions, TrimOnly and TrimJobMode are ignored. Otherwise
+        TrimOnly needs ForceDeleteOldVersions (it would have nothing to do) and a delegated run (the trim
+        job API is not supported with app-only authentication), and the trim plan is validated once
+        (mode, 30-day minimum, January 1, 2023 limit). -CleanupAdminsOnly only revokes grants and
+        skips the plan check. A TrimJobMode that is set without ForceDeleteOldVersions is ignored with a warning.
+    #>
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(Mandatory = $true)] [bool] $ForceDeleteOldVersions,
+        [Parameter(Mandatory = $true)] [bool] $TrimOnly,
+        [Parameter(Mandatory = $true)] [bool] $ExportJobStatus,
+        [Parameter(Mandatory = $true)] [bool] $CleanupAdminsOnly,
+        [Parameter(Mandatory = $true)] [bool] $IsAzureAutomation,
+        [Parameter(Mandatory = $true)] [string] $VersionPolicyMode,
+        [Parameter()] [string] $TrimJobMode = 'Auto',
+        [Parameter()] [int] $MajorVersions = 50,
+        [Parameter()] [int] $MajorWithMinorVersions = 0,
+        [Parameter()] [int] $ExpireAfterDays = 0,
+        [Parameter()] [datetime] $Now = (Get-Date)
+    )
+    if ($ExportJobStatus -and $CleanupAdminsOnly) {
+        throw "-ExportJobStatus and -CleanupAdminsOnly are separate modes; run them one at a time."
+    }
+    if ($ExportJobStatus) {
+        if ($IsAzureAutomation) {
+            throw "-ExportJobStatus is a local (delegated) operation and is not supported under Azure Automation."
+        }
+        return
+    }
+    if ($CleanupAdminsOnly) { return }
+    if ($TrimOnly) {
+        if (-not $ForceDeleteOldVersions) {
+            throw "'TrimOnly' requires 'ForceDeleteOldVersions' = true: TrimOnly submits the trim job and changes nothing else, so there would be nothing to do."
+        }
+        if ($IsAzureAutomation) {
+            throw "'TrimOnly' submits trim jobs, which need a delegated (local) run: the trim job API is not supported with app-only authentication."
+        }
+    }
+    if ($ForceDeleteOldVersions) {
+        $null = Get-VersionTrimJobPlan -Mode $VersionPolicyMode -TrimJobMode $TrimJobMode -MajorVersions $MajorVersions `
+            -MajorWithMinorVersions $MajorWithMinorVersions -ExpireAfterDays $ExpireAfterDays -Now $Now
+    }
+    elseif ($TrimJobMode -ne 'Auto') {
+        Write-Warning "'TrimJobMode' = '$TrimJobMode' is ignored because 'ForceDeleteOldVersions' is false: no trim job is submitted."
+    }
+}
+
+function ConvertTo-JobStatusRow {
+    <#
+        .SYNOPSIS
+        Flattens the object returned by Get-PnPSiteFileVersionBatchDeleteJobStatus into one CSV row.
+
+        .DESCRIPTION
+        Tolerates missing properties and the two spellings of the cut-off date (DeleteOlderThan in
+        PnP.PowerShell, DeleteOlderThanInUTC in the SharePoint Online Management Shell), so the CSV
+        keeps the same columns across module versions. A null status gives Status 'NoResponse'.
+        The four date columns are written as yyyy-MM-dd HH:mm:ss (UTC).
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param
+    (
+        [Parameter(Mandatory = $true)] [string] $SiteUrl,
+        [Parameter()] [AllowNull()] $Status,
+        [Parameter()] [string] $ExportedAtUtc = ''
+    )
+    function Get-StatusProp($obj, [string[]]$names) {
+        if ($null -eq $obj) { return '' }
+        foreach ($n in $names) {
+            $p = $obj.PSObject.Properties[$n]
+            if ($null -ne $p -and $null -ne $p.Value) { return [string]$p.Value }
+        }
+        return ''
+    }
+    # SharePoint returns these dates as invariant-culture text (MM/dd/yyyy HH:mm:ss, UTC), which Excel reads in the
+    # local order (05/11 becomes 11 May on a French machine): write them as yyyy-MM-dd HH:mm:ss. A value that does
+    # not have that shape is kept as returned.
+    function Get-StatusDate($obj, [string[]]$names) {
+        if ($null -eq $obj) { return '' }
+        foreach ($n in $names) {
+            $p = $obj.PSObject.Properties[$n]
+            if ($null -eq $p -or $null -eq $p.Value) { continue }
+            if ($p.Value -is [datetime]) { return $p.Value.ToString('yyyy-MM-dd HH:mm:ss', [cultureinfo]::InvariantCulture) }
+            $text = [string]$p.Value
+            $parsed = [datetime]::MinValue
+            if ([datetime]::TryParseExact($text.Trim(), [string[]]@('MM/dd/yyyy HH:mm:ss', 'M/d/yyyy H:mm:ss'), [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+                return $parsed.ToString('yyyy-MM-dd HH:mm:ss', [cultureinfo]::InvariantCulture)
+            }
+            return $text
+        }
+        return ''
+    }
+    $state = Get-StatusProp $Status @('Status')
+    if ([string]::IsNullOrEmpty($state)) { $state = 'NoResponse' }
+    return [pscustomobject][ordered]@{
+        Url                         = $SiteUrl
+        Status                      = $state
+        BatchDeleteMode             = Get-StatusProp $Status @('BatchDeleteMode')
+        RequestTimeInUTC            = Get-StatusDate $Status @('RequestTimeInUTC')
+        LastProcessTimeInUTC        = Get-StatusDate $Status @('LastProcessTimeInUTC')
+        CompleteTimeInUTC           = Get-StatusDate $Status @('CompleteTimeInUTC')
+        DeleteOlderThanInUTC        = Get-StatusDate $Status @('DeleteOlderThanInUTC', 'DeleteOlderThan')
+        MajorVersionLimit           = Get-StatusProp $Status @('MajorVersionLimit')
+        MajorWithMinorVersionsLimit = Get-StatusProp $Status @('MajorWithMinorVersionsLimit')
+        FilesProcessed              = Get-StatusProp $Status @('FilesProcessed')
+        VersionsProcessed           = Get-StatusProp $Status @('VersionsProcessed')
+        VersionsDeleted             = Get-StatusProp $Status @('VersionsDeleted')
+        VersionsFailed              = Get-StatusProp $Status @('VersionsFailed')
+        StorageReleasedInBytes      = Get-StatusProp $Status @('StorageReleasedInBytes')
+        ErrorMessage                = Get-StatusProp $Status @('ErrorMessage')
+        ExportedAtUtc               = $ExportedAtUtc
+    }
+}
+
+function Add-JobStatusErrorRows {
+    <#
+        .SYNOPSIS
+        Adds a CSV row for every site that could not be read (AccessDenied, NotFound, Failed), so the
+        export lists the whole input and a missing site is visible instead of silently absent.
+    #>
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(Mandatory = $true)] [System.Collections.Generic.List[object]] $Rows,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [System.Collections.IEnumerable] $Results,
+        [Parameter()] [string] $ExportedAtUtc = ''
+    )
+    foreach ($r in $Results) {
+        if ($r.Outcome -notin @('AccessDenied', 'NotFound', 'Failed')) { continue }
+        if (@($Rows | Where-Object { $_.Url -eq $r.Site }).Count -gt 0) { continue }
+        $Rows.Add((ConvertTo-JobStatusRow -SiteUrl ([string]$r.Site) -ExportedAtUtc $ExportedAtUtc -Status ([pscustomobject]@{
+                        Status       = [string]$r.Outcome
+                        ErrorMessage = [string]$r.Detail
+                    })))
+    }
+}
+
+function Get-JobStatusSummary {
+    <#
+        .SYNOPSIS
+        Totals for a job status export: sites per status, versions deleted and storage released.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param
+    (
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Rows
+    )
+    function ConvertTo-LongOrZero($value) {
+        $n = [long]0
+        if ([long]::TryParse([string]$value, [ref]$n)) { return $n }
+        return [long]0
+    }
+    $byStatus = [ordered]@{}
+    foreach ($g in @($Rows | Group-Object -Property Status | Sort-Object -Property @{ Expression = 'Count'; Descending = $true }, Name)) {
+        $byStatus[$g.Name] = $g.Count
+    }
+    $sum = { param($prop) [long](@($Rows | ForEach-Object { ConvertTo-LongOrZero $_.$prop }) | Measure-Object -Sum).Sum }
+    # SharePoint reports a site without a kept job as 'NoRequestFound' ('No request found' in the shell): count both spellings.
+    $noRequestFound = 0
+    foreach ($statusName in $byStatus.Keys) {
+        if (($statusName -replace '[^A-Za-z]', '') -ieq 'NoRequestFound') { $noRequestFound += $byStatus[$statusName] }
+    }
+    $bytes = & $sum 'StorageReleasedInBytes'
+    return [pscustomobject]@{
+        Sites                = @($Rows).Count
+        ByStatus             = $byStatus
+        NoRequestFound       = $noRequestFound
+        FilesProcessed       = & $sum 'FilesProcessed'
+        VersionsProcessed    = & $sum 'VersionsProcessed'
+        VersionsDeleted      = & $sum 'VersionsDeleted'
+        VersionsFailed       = & $sum 'VersionsFailed'
+        StorageReleasedBytes = $bytes
+        StorageReleasedGB    = [math]::Round($bytes / 1GB, 2)
+    }
+}
+
+function Export-JobStatusCsv {
+    <#
+        .SYNOPSIS
+        Writes the job status rows as a CSV (culture list separator, so it opens straight in Excel;
+        UTF-8 with BOM). -WhatIf:$false so that a DryRun configuration does not stop the export.
+    #>
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(Mandatory = $true)] [object[]] $Rows,
+        [Parameter(Mandatory = $true)] [string] $Path
+    )
+    $Rows | Export-Csv -Path $Path -NoTypeInformation -UseCulture -Encoding utf8BOM -WhatIf:$false
 }
 
 function Get-TenantSiteUrls {
@@ -1406,6 +1693,22 @@ if ($CleanupAdminsOnly) {
 }
 $script:NeedAdminCenter = $script:JitAdminEnabled -or [bool]$CleanupAdminsOnly
 
+# Trim options: fail fast, before any sign-in, on a combination or a trim plan that cannot work
+# (once for the whole run, rather than as one 'Failed' row per site).
+Assert-TrimOptions -ForceDeleteOldVersions $ForceDeleteOldVersions -TrimOnly $TrimOnly -ExportJobStatus ([bool]$ExportJobStatus) `
+    -CleanupAdminsOnly ([bool]$CleanupAdminsOnly) -IsAzureAutomation ([bool]$script:IsAzureAutomationRun) `
+    -VersionPolicyMode $VersionPolicyMode -TrimJobMode $TrimJobMode `
+    -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions -ExpireAfterDays $ExpireVersionsAfterDays
+# Label and report scope of the run: the policy mode, or the mode that bypasses the policy.
+$script:RunScope = if ($ExportJobStatus) { 'JobStatus' } elseif ($TrimOnly) { 'Trim' } else { $VersionPolicyMode }
+if ($ExportJobStatus) {
+    Write-SpsLine -Kind info -Message 'Mode: job status export (read-only: no version policy is read or changed, no job is submitted).'
+}
+elseif ($TrimOnly) {
+    Write-SpsLine -Kind info -Message "Mode: trim jobs only (TrimJobMode=$TrimJobMode): the version policy is not read or changed."
+}
+$script:StatusExportedAtUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')
+
 # --- Local sign-in: sign in ONCE (interactive) before enumeration and the site loop, so the whole
 # run prompts a single time. This anchor connection serves the tenant enumeration directly (passed
 # as -Connection to Get-PnPTenantSite) and is the source of the delegated SharePoint token reused
@@ -1529,7 +1832,7 @@ foreach ($SiteUrl in $SiteUrls) {
     $script:SiteIndex++
     if (-not $script:VisualIsAutomation) {
         $pct = if ($script:TotalSites -gt 0) { [int](($script:SiteIndex / $script:TotalSites) * 100) } else { 0 }
-        Write-Progress -Id 1 -Activity "SPSCleanVersions ($VersionPolicyMode)" `
+        Write-Progress -Id 1 -Activity "SPSCleanVersions ($($script:RunScope))" `
             -Status "Site $($script:SiteIndex) of $($script:TotalSites): $SiteUrl" `
             -PercentComplete $pct
     }
@@ -1553,7 +1856,7 @@ foreach ($SiteUrl in $SiteUrls) {
                 $script:JitGranted++
                 if (-not $effective) {
                     Write-Warning "`tJIT grant not confirmed effective on $SiteUrl within the wait window; skipping processing (the grant will still be revoked)."
-                    Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'Failed' -Detail 'JIT admin grant not effective within the wait window; site skipped (grant will be revoked).'
+                    Add-RunResult -SiteUrl $SiteUrl -Scope $($script:RunScope) -Outcome 'Failed' -Detail 'JIT admin grant not effective within the wait window; site skipped (grant will be revoked).'
                     continue
                 }
             }
@@ -1597,7 +1900,21 @@ foreach ($SiteUrl in $SiteUrls) {
             }
         }
 
-        if ($VersionPolicyMode -eq 'Legacy') {
+        if ($ExportJobStatus) {
+            # --- Job status export: read-only. Reads the trim job state of the connected site; no version
+            # policy is read or changed and no job is submitted. ---
+            Write-SpsLine -Detail -Kind info -Message "Reading the trim job status on $SiteUrl..."
+            $jobStatus = Invoke-RetryCommand -OperationName 'Get-PnPSiteFileVersionBatchDeleteJobStatus' -ScriptBlock { Get-PnPSiteFileVersionBatchDeleteJobStatus -ErrorAction Stop }
+            $statusRow = ConvertTo-JobStatusRow -SiteUrl $SiteUrl -Status $jobStatus -ExportedAtUtc $script:StatusExportedAtUtc
+            $script:JobStatusRows.Add($statusRow)
+            $statusDetail = "Status=$($statusRow.Status); VersionsDeleted=$($statusRow.VersionsDeleted); StorageReleasedInBytes=$($statusRow.StorageReleasedInBytes)"
+            Write-SpsLine -Detail -Kind ok -Message $statusDetail
+            Add-RunResult -SiteUrl $SiteUrl -Scope 'JobStatus' -Outcome 'Reported' -Detail $statusDetail
+        }
+        elseif ($TrimOnly) {
+            # Neither the version policy nor the libraries are read or changed: the trim job below is the only action.
+        }
+        elseif ($VersionPolicyMode -eq 'Legacy') {
             # --- Legacy mode: per-library count-based limits via Set-PnPList ---
             # Get all Lists in the Site
             Write-SpsLine -Detail -Kind info -Message "Retrieving lists from $SiteUrl..."
@@ -1778,9 +2095,11 @@ interactively with a SharePoint Administrator to cover existing libraries for: $
 
         # Force deletion of old file version history. A version policy only governs versions created
         # afterwards, so existing versions are cleaned by a trim job; submit the job that matches the
-        # policy mode (age / automatic / count) rather than always a count-limit one.
-        if ($ForceDeleteOldVersions) {
-            $trimPlan = Get-VersionTrimJobPlan -Mode $VersionPolicyMode -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions -ExpireAfterDays $ExpireVersionsAfterDays
+        # policy mode (age / automatic / count), or the one forced by TrimJobMode, rather than always a
+        # count-limit one. Never in -ExportJobStatus mode, which is read-only.
+        if ($ForceDeleteOldVersions -and -not $ExportJobStatus) {
+            $trimPlan = Get-VersionTrimJobPlan -Mode $VersionPolicyMode -TrimJobMode $TrimJobMode -MajorVersions $KeepMajorVersions -MajorWithMinorVersions $KeepMinorVersions -ExpireAfterDays $ExpireVersionsAfterDays
+            $trimScope = "Trim ($($trimPlan.Kind))"
             if ($PSCmdlet.ShouldProcess($SiteUrl, "Submit $($trimPlan.Kind) file version trim job ($($trimPlan.Description))")) {
                 if (Test-IsAzureAutomation) {
                     Write-Warning @"
@@ -1788,6 +2107,7 @@ Batch delete of file versions is NOT supported with app-only authentication.
 This SharePoint API requires delegated user context.
 Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
 "@
+                    Add-RunResult -SiteUrl $SiteUrl -Scope $trimScope -Outcome 'Skipped' -Detail 'Trim job not supported with app-only authentication; run locally with a delegated account.'
                 }
                 else {
                     try {
@@ -1795,6 +2115,7 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                         $batchParams = $trimPlan.Parameters
                         Invoke-RetryCommand -OperationName 'New-PnPSiteFileVersionBatchDeleteJob' -ScriptBlock { New-PnPSiteFileVersionBatchDeleteJob @batchParams -Force -ErrorAction Stop }
                         Write-SpsLine -Detail -Kind ok -Message "$($trimPlan.Kind) trim job submitted successfully for $SiteUrl"
+                        Add-RunResult -SiteUrl $SiteUrl -Scope $trimScope -Outcome 'Submitted' -Detail $trimPlan.Description
                     }
                     catch {
                         if ((Test-IsAccessDeniedError -ErrorRecord $_) -or (Test-IsNotFoundError -ErrorRecord $_)) {
@@ -1808,12 +2129,17 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                             # benign "already queued" state, not a failure — skip it without the
                             # alarming FAILED warning and without burning retry backoff.
                             Write-SpsLine -Detail -Kind skip -Message "Batch delete already in progress on ${SiteUrl} (a previous cleanup job is still running); skipped."
+                            Add-RunResult -SiteUrl $SiteUrl -Scope $trimScope -Outcome 'InProgress' -Detail 'A previous trim job is still running on this site; nothing submitted. Run this site again later.'
                         }
                         else {
                             Write-Warning "`tFAILED to submit batch delete job for ${SiteUrl}: $($_.Exception.Message)"
+                            Add-RunResult -SiteUrl $SiteUrl -Scope $trimScope -Outcome 'Failed' -Detail $_.Exception.Message
                         }
                     }
                 }
+            }
+            elseif ($WhatIfPreference) {
+                Add-RunResult -SiteUrl $SiteUrl -Scope $trimScope -Outcome 'WouldSubmit' -Detail $trimPlan.Description
             }
         }
             }
@@ -1832,7 +2158,7 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                     }
                     else {
                         Write-Warning "`tJIT grant not confirmed effective on $SiteUrl within the wait window; skipping processing (the grant will still be revoked)."
-                        Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'Failed' -Detail 'JIT admin grant not effective within the wait window; site skipped (grant will be revoked).'
+                        Add-RunResult -SiteUrl $SiteUrl -Scope $($script:RunScope) -Outcome 'Failed' -Detail 'JIT admin grant not effective within the wait window; site skipped (grant will be revoked).'
                     }
                 }
                 else {
@@ -1860,7 +2186,7 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
                 $accessDeniedDetail = 'Access denied: the signed-in account is not a site collection administrator on this site. Grant site admin and retry.'
                 Write-Warning "Access denied on ${SiteUrl}: the signed-in account is not a site collection administrator on this site. Add it as a site collection admin (or, once available, re-run with the AddSiteCollectionAdmin option) and retry. Skipping this site. Original error: $($_.Exception.Message)"
             }
-            Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'AccessDenied' -Detail $accessDeniedDetail
+            Add-RunResult -SiteUrl $SiteUrl -Scope $($script:RunScope) -Outcome 'AccessDenied' -Detail $accessDeniedDetail
         }
         elseif (Test-IsNotFoundError -ErrorRecord $_) {
             # The site was not found (HTTP 404): it does not exist, was deleted, or the URL is
@@ -1868,12 +2194,12 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
             # string — those are stripped during normalization, but a stale/deleted site can still
             # 404). Not retried (fail-fast), recorded distinctly and skipped so the run continues.
             Write-Warning "Site not found on ${SiteUrl}: the site does not exist, was deleted, or the URL is malformed. Verify the URL (a canonical site URL is https://<tenant>.sharepoint.com/sites/<name>, with no query string). Skipping this site. Original error: $($_.Exception.Message)"
-            Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'NotFound' `
+            Add-RunResult -SiteUrl $SiteUrl -Scope $($script:RunScope) -Outcome 'NotFound' `
                 -Detail 'Site not found (404): the site does not exist, was deleted, or the URL is malformed. Verify the URL and retry.'
         }
         else {
             Write-Error "Failed to process site $SiteUrl : $($_.Exception.Message)"
-            Add-RunResult -SiteUrl $SiteUrl -Scope $VersionPolicyMode -Outcome 'Failed' -Detail $_.Exception.Message
+            Add-RunResult -SiteUrl $SiteUrl -Scope $($script:RunScope) -Outcome 'Failed' -Detail $_.Exception.Message
         }
     }
     finally {
@@ -1895,6 +2221,31 @@ Skipping New-PnPSiteFileVersionBatchDeleteJob for site: $SiteUrl
     }
 }
 if (-not $script:VisualIsAutomation) { Write-Progress -Id 1 -Activity 'SPSCleanVersions' -Completed }
+
+# Job status export (-ExportJobStatus): write the CSV (one row per input site, unreadable sites included)
+# and show what the jobs achieved so far.
+if ($ExportJobStatus) {
+    Add-JobStatusErrorRows -Rows $script:JobStatusRows -Results $script:RunResults -ExportedAtUtc $script:StatusExportedAtUtc
+    if ($script:JobStatusRows.Count -eq 0) {
+        Write-Warning 'No trim job status could be read: no CSV was written.'
+    }
+    else {
+        $statusCsvPath = Join-Path -Path $script:ResultsFolder -ChildPath ("SPSCleanVersions-JobStatus-$($script:RunTimestamp).csv")
+        try {
+            Export-JobStatusCsv -Rows $script:JobStatusRows.ToArray() -Path $statusCsvPath
+            Write-SpsLine -Kind info -Message "Job status CSV written to: $statusCsvPath"
+        }
+        catch {
+            Write-Warning "Unable to write the job status CSV: $($_.Exception.Message)"
+        }
+        $statusSummary = Get-JobStatusSummary -Rows $script:JobStatusRows.ToArray()
+        $statusParts = ($statusSummary.ByStatus.GetEnumerator() | ForEach-Object { "$($_.Value) $($_.Key)" }) -join ', '
+        Write-Output "--- SPSCleanVersions job status: $($statusSummary.Sites) site(s) — $statusParts — $($statusSummary.VersionsDeleted) version(s) deleted, $($statusSummary.StorageReleasedGB) GB released ---"
+        if ($statusSummary.NoRequestFound -gt 0) {
+            Write-Warning "$($statusSummary.NoRequestFound) site(s) report 'NoRequestFound': no trim job is kept for them (never submitted, or its state has expired since it completed). Compare with the sites you submitted."
+        }
+    }
+}
 
 #region --- Report output ---
 # The HTML report is a local artifact only. In Azure Automation there is no persistent
@@ -1939,6 +2290,9 @@ $sumSkipped = @($script:RunResults | Where-Object { $_.Outcome -eq 'Skipped' -or
 $sumAccessDenied = @($script:RunResults | Where-Object { $_.Outcome -eq 'AccessDenied' }).Count
 $sumNotFound = @($script:RunResults | Where-Object { $_.Outcome -eq 'NotFound' }).Count
 $sumFailed = @($script:RunResults | Where-Object { $_.Outcome -eq 'Failed' }).Count
+$sumSubmitted = @($script:RunResults | Where-Object { $_.Outcome -eq 'Submitted' }).Count
+$sumWouldSubmit = @($script:RunResults | Where-Object { $_.Outcome -eq 'WouldSubmit' }).Count
+$sumInProgress = @($script:RunResults | Where-Object { $_.Outcome -eq 'InProgress' }).Count
 $distinctSites = @($script:RunResults | Select-Object -ExpandProperty Site -Unique).Count
 $appliedPart = if ($WhatIfPreference) { "$sumWouldApply would apply" } else { "$sumApplied applied" }
 # Machine-readable anchor line (kept stable for log scrapers), then a compact colour summary.
@@ -1950,6 +2304,12 @@ Write-SpsLine -Detail -Kind skip -Message "$sumSkipped skipped/compliant"
 Write-SpsLine -Detail -Kind $(if ($sumAccessDenied -gt 0) { 'deny' } else { 'skip' }) -Message "$sumAccessDenied access-denied"
 Write-SpsLine -Detail -Kind $(if ($sumNotFound -gt 0) { 'warn' } else { 'skip' }) -Message "$sumNotFound not-found"
 Write-SpsLine -Detail -Kind $(if ($sumFailed -gt 0) { 'deny' } else { 'skip' }) -Message "$sumFailed failed"
+if (($sumSubmitted + $sumWouldSubmit + $sumInProgress) -gt 0) {
+    # Second anchor line for trim jobs (the 'finished' line above keeps its format for log scrapers).
+    Write-Output "--- SPSCleanVersions trim jobs: $sumSubmitted submitted, $sumWouldSubmit would submit, $sumInProgress already in progress ---"
+    Write-SpsLine -Detail -Kind ok -Message $(if ($WhatIfPreference) { "$sumWouldSubmit trim job(s) would be submitted" } else { "$sumSubmitted trim job(s) submitted" })
+    if ($sumInProgress -gt 0) { Write-SpsLine -Detail -Kind skip -Message "$sumInProgress site(s) already have a trim job running: run them again later" }
+}
 if ($script:JitAdminEnabled) {
     Write-SpsLine -Detail -Kind jit -Message "JIT  $($script:JitGranted) granted - $($script:JitRevoked) revoked - $($script:JitRevokeFailed) revoke-failed"
 }

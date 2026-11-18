@@ -94,6 +94,7 @@ When the script runs as a runbook it authenticates with the Automation Account's
 | Site version policy → **site default / new libraries** (`-ApplyToNewDocumentLibraries`) | ✅ Works | *"The setting for new libraries takes effect immediately."* |
 | Site version policy → **existing libraries** (`-ApplyToExistingDocumentLibraries`) | ❌ Not supported | *"Cannot call this API with an app-only principal."* In a runbook, `ApplyTo=Both` is downgraded to `New` and `ApplyTo=Existing` is skipped, with a warning. |
 | Force delete old versions (`New-PnPSiteFileVersionBatchDeleteJob`, `ForceDeleteOldVersions`) | ❌ Not supported | Requires a delegated context; auto-skipped in Azure Automation. |
+| Trim jobs only (`TrimOnly`) and trim job status export (`-ExportJobStatus`) | ❌ Not supported | Local (delegated) runs only: the script stops before signing in when they are requested in Azure Automation. |
 | HTML report / transcript | ❌ Not produced | The Automation sandbox has no persistent filesystem; per-site actions and the summary line appear in the job output instead. |
 | Interactive login | ❌ Not available | Managed Identity only — there is no user context. |
 
