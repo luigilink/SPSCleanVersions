@@ -302,7 +302,7 @@ The [`Config/`](https://github.com/luigilink/SPSCleanVersions/tree/main/Config) 
 
 | File | Scenario |
 |---|---|
-| [`SPSCleanVersions.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.example.json) | Reference: every property at once, with its default value. |
+| [`SPSCleanVersions.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.example.json) | Reference: every property at once, with representative values (the defaults are in the [properties table](#properties), and differ: for example `Legacy`, `50` versions and `DryRun` off). |
 | [`SPSCleanVersions.legacy-count.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.legacy-count.example.json) | `Legacy` (the default mode): major and minor version count limits per document library. |
 | [`SPSCleanVersions.auto-expiration.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.auto-expiration.example.json) | `AutoExpiration`: automatic expiration managed by SharePoint, then the automatic trim job for the existing versions. |
 | [`SPSCleanVersions.expire-after.example.json`](https://github.com/luigilink/SPSCleanVersions/blob/main/Config/SPSCleanVersions.expire-after.example.json) | `ExpireAfter`: versions expire after a number of days, then the age-based trim job for the existing versions. |

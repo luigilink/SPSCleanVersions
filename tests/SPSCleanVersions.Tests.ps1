@@ -2224,6 +2224,8 @@ Describe 'SPSCleanVersions Script' {
         It 'The README and the script help point to the examples' {
             $script:readme | Should -Match 'Configuration#example-files'
             $scriptContent | Should -Match 'Config/SPSCleanVersions\.<scenario>\.example\.json'
+            # Installed users (release archive, PowerShell Gallery) only have the script: the help needs a URL, not a path.
+            $scriptContent | Should -Match 'https://github\.com/luigilink/SPSCleanVersions/wiki/Configuration#example-files'
         }
     }
 }
