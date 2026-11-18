@@ -515,6 +515,50 @@ Describe 'SPSCleanVersions Script' {
         }
     }
 
+    Context 'Expiration window checks when the version policy is bypassed (functional)' {
+
+        BeforeAll {
+            $sp = Join-Path $PSScriptRoot '..' 'scripts' 'SPSCleanVersions.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $sp), [ref]$null, [ref]$null)
+            # The real expiration window checks of the configuration parsing: every top-level statement that holds one of
+            # the two messages, whatever its shape (two plain if statements, or one wrapper that skips them).
+            $checks = @($ast.EndBlock.Statements | Where-Object { $_.Extent.Text -match 'must be 0 \(no expiration\)|requires ''ExpireVersionsAfterDays''' })
+            $script:guardText = ($checks | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine
+            function Invoke-ExpirationChecks($trimOnly, $exportJobStatus, $mode, $days) {
+                $TrimOnly = $trimOnly; $ExportJobStatus = $exportJobStatus; $VersionPolicyMode = $mode; $ExpireVersionsAfterDays = $days
+                . ([ScriptBlock]::Create($script:guardText))
+            }
+        }
+
+        It 'Finds the guard in the script' {
+            $script:guardText | Should -Not -BeNullOrEmpty
+        }
+
+        It 'TrimOnly with a count-based job does not need an expiration window (ExpireAfter policy left at 0 days)' {
+            { Invoke-ExpirationChecks $true $false 'ExpireAfter' 0 } | Should -Not -Throw
+        }
+
+        It '-ExportJobStatus does not need an expiration window either' {
+            { Invoke-ExpirationChecks $false $true 'ExpireAfter' 0 } | Should -Not -Throw
+        }
+
+        It 'A value that would be refused for a policy is accepted when the policy is bypassed' {
+            { Invoke-ExpirationChecks $true $false 'Legacy' 15 } | Should -Not -Throw
+        }
+
+        It 'Still refuses ExpireAfter without a window when a policy is applied' {
+            { Invoke-ExpirationChecks $false $false 'ExpireAfter' 0 } | Should -Throw "*requires 'ExpireVersionsAfterDays'*"
+        }
+
+        It 'Still refuses a window between 1 and 29 days when a policy is applied' {
+            { Invoke-ExpirationChecks $false $false 'Legacy' 15 } | Should -Throw "*must be 0 (no expiration) or greater than or equal to 30*"
+        }
+
+        It 'Accepts a valid window when a policy is applied' {
+            { Invoke-ExpirationChecks $false $false 'ExpireAfter' 365 } | Should -Not -Throw
+        }
+    }
+
     Context 'Get-VersionTrimJobPlan TrimJobMode and the 2023 cutoff (functional)' {
 
         BeforeAll {

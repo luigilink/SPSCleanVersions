@@ -124,6 +124,7 @@ With `ForceDeleteOldVersions: true` and `TrimOnly: true`, the script submits the
 - It needs `ForceDeleteOldVersions: true` and a **delegated** (local) run: the script stops before signing in otherwise.
 - `SiteScope: All` is accepted with the default `VersionPolicyMode: Legacy`, because the policy mode is not used. Combine it with `AddSiteCollectionAdmin` for a large batch, as for any delegated run.
 - The job is chosen with `TrimJobMode` (with `Auto`, it follows `VersionPolicyMode`).
+- The policy settings (`VersionPolicyMode`, `ExpireVersionsAfterDays`, `ApplyTo`) are not validated for a policy, since none is applied: `ExpireVersionsAfterDays` is only checked (30 days minimum, January 1, 2023 limit) when the job is age-based, and `KeepMajorVersions` / `KeepMinorVersions` are only used by a count-based job. The same applies to `-ExportJobStatus`, which uses none of them.
 - Each site gets a result row with the scope `Trim (Age)`, `Trim (Count)` or `Trim (Automatic)` and the outcome `Submitted`, `WouldSubmit` (`DryRun`), `InProgress` (a previous job is still running on the site: run it again later) or `Failed`.
 
 ```json

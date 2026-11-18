@@ -323,11 +323,16 @@ $TrimJobMode = $matchedTrimJobMode
 
 # ExpireVersionsAfterDays must be 0 (NoExpiration) or >= 30 (ExpireAfter), per the
 # Set-PnPSiteVersionPolicy contract. ExpireAfter additionally requires a value >= 30.
-if ($ExpireVersionsAfterDays -ne 0 -and $ExpireVersionsAfterDays -lt 30) {
-    throw "'ExpireVersionsAfterDays' must be 0 (no expiration) or greater than or equal to 30."
-}
-if ($VersionPolicyMode -eq 'ExpireAfter' -and $ExpireVersionsAfterDays -lt 30) {
-    throw "VersionPolicyMode 'ExpireAfter' requires 'ExpireVersionsAfterDays' to be greater than or equal to 30."
+# Only checked when a version policy is applied: with TrimOnly or -ExportJobStatus the policy is neither
+# read nor changed, and Assert-TrimOptions validates the window of an age-based trim job, so the default
+# of 0 must not stop a count-based trim or a status export.
+if (-not ($TrimOnly -or $ExportJobStatus)) {
+    if ($ExpireVersionsAfterDays -ne 0 -and $ExpireVersionsAfterDays -lt 30) {
+        throw "'ExpireVersionsAfterDays' must be 0 (no expiration) or greater than or equal to 30."
+    }
+    if ($VersionPolicyMode -eq 'ExpireAfter' -and $ExpireVersionsAfterDays -lt 30) {
+        throw "VersionPolicyMode 'ExpireAfter' requires 'ExpireVersionsAfterDays' to be greater than or equal to 30."
+    }
 }
 
 # 'SiteScope: All' only makes sense for the site version policy modes; the Legacy

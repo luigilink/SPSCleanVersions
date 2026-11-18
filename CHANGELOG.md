@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     at a time.
   - **`TrimOnly` setting.** With `ForceDeleteOldVersions`, only the trim job is submitted: the site version
     policy is not read or changed and no library is listed. `SiteScope: All` is accepted with `Legacy` in
-    this mode. It needs a delegated run, which is checked before the sign-in.
+    this mode, and the policy settings (such as an `ExpireVersionsAfterDays` left at `0`) no longer stop a
+    count-based trim or a status export. It needs a delegated run, which is checked before the sign-in.
   - **`-ExportJobStatus` switch.** Read-only: reads the trim job state of each site
     (`Get-PnPSiteFileVersionBatchDeleteJobStatus`) and writes
     `Results/SPSCleanVersions-JobStatus-<timestamp>.csv` (status, times as `yyyy-MM-dd HH:mm:ss` UTC, versions
